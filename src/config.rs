@@ -25,9 +25,14 @@ pub struct TracingConfig {
     // -- Curve fitting --
     /// Accuracy for kurbo fit_to_bezpath_opt (Frechet distance tolerance
     /// in font units). Smaller = more points, closer fit.
+    /// 4.0 is good for type design (clean curves, few points).
     pub fit_accuracy: f64,
-    /// RDP simplification epsilon (in pixel coordinates, before scaling).
+    /// RDP simplification epsilon (in font units, after scaling).
+    /// Higher = fewer points, smoother input to curve fitter.
     pub rdp_epsilon: f64,
+    /// Smoothing iterations applied to polyline points before curve fitting.
+    /// Removes pixel staircase noise. 0 = no smoothing.
+    pub smooth_iterations: usize,
 
     // -- Post-processing --
     /// Grid size for coordinate snapping. 0 = no snapping.
@@ -36,6 +41,9 @@ pub struct TracingConfig {
     pub add_extrema: bool,
     /// Whether to correct contour direction (CCW outer, CW counter).
     pub fix_direction: bool,
+    /// Minimum depth for extrema insertion. Extrema shallower than this
+    /// (in font units) are skipped. Glyphs.app recommends ~20.
+    pub min_extrema_depth: f64,
     /// Chamfer size. 0 = no chamfers. 16 = Virtua Grotesk Regular.
     pub chamfer_size: f64,
     /// Minimum edge length to chamfer (edges shorter than this are skipped).
@@ -75,11 +83,13 @@ impl Default for TracingConfig {
             min_contour_area: 100.0,
             corner_angle_threshold: 0.5,
             corner_window: 5,
-            fit_accuracy: 1.0,
-            rdp_epsilon: 2.0,
+            fit_accuracy: 8.0,
+            rdp_epsilon: 8.0,
+            smooth_iterations: 0,
             grid: 0,
             add_extrema: true,
             fix_direction: true,
+            min_extrema_depth: 20.0,
             chamfer_size: 0.0,
             chamfer_min_edge: 40.0,
             advance_width: None,

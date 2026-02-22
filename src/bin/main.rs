@@ -33,9 +33,13 @@ struct Cli {
     #[arg(long, default_value = "0")]
     chamfer: f64,
 
-    /// Curve fitting accuracy in font units (smaller = more precise)
-    #[arg(long, default_value = "1.0")]
+    /// Curve fitting accuracy in font units (smaller = more precise, more points)
+    #[arg(long, default_value = "8.0")]
     accuracy: f64,
+
+    /// RDP simplification epsilon in font units (higher = fewer input points)
+    #[arg(long, default_value = "8.0")]
+    rdp_epsilon: f64,
 
     /// Corner detection angle threshold in degrees
     #[arg(long, default_value = "30")]
@@ -61,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.grid = cli.grid;
     config.chamfer_size = cli.chamfer;
     config.fit_accuracy = cli.accuracy;
+    config.rdp_epsilon = cli.rdp_epsilon;
     config.corner_angle_threshold = cli.corner_threshold.to_radians();
     config.advance_width = cli.width;
     config.target_height = cli.target_height;

@@ -1,4 +1,4 @@
-use kurbo::{BezPath, CubicBez, PathEl, Point, Vec2};
+use kurbo::{BezPath, CubicBez, ParamCurve, PathEl, Point, Vec2};
 
 use crate::config::TracingConfig;
 
@@ -6,17 +6,32 @@ use crate::config::TracingConfig;
 pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
     let mut result = paths.to_vec();
 
-    if config.add_extrema {
-        result = result.iter().map(|p| insert_extrema(p)).collect();
-    }
-
-    if config.grid > 0 {
-        result = result.iter().map(|p| snap_to_grid(p, config.grid)).collect();
-    }
-
     if config.fix_direction {
         result = fix_contour_directions(&result);
     }
+
+    if config.add_extrema {
+        result = result
+            .iter()
+            .map(|p| insert_extrema(p, config.min_extrema_depth))
+            .collect();
+    }
+
+    if config.grid > 0 {
+        result = result
+            .iter()
+            .map(|p| snap_to_grid(p, config.grid))
+            .collect();
+    }
+
+    // Clean up: convert near-straight curves to lines, merge collinear lines,
+    // remove tiny segments
+    let tol = if config.grid > 0 {
+        config.grid as f64
+    } else {
+        1.0
+    };
+    result = result.iter().map(|p| cleanup(p, tol)).collect();
 
     if config.chamfer_size > 0.0 {
         result = result
@@ -245,7 +260,7 @@ enum SegType {
 // Extrema insertion
 // ---------------------------------------------------------------------------
 
-fn insert_extrema(path: &BezPath) -> BezPath {
+fn insert_extrema(path: &BezPath, min_depth: f64) -> BezPath {
     let mut result = BezPath::new();
     let mut current = Point::ZERO;
 
@@ -261,7 +276,7 @@ fn insert_extrema(path: &BezPath) -> BezPath {
             }
             PathEl::CurveTo(p1, p2, p3) => {
                 let cubic = CubicBez::new(current, p1, p2, p3);
-                let extrema_t = find_extrema_t(&cubic);
+                let extrema_t = find_extrema_t(&cubic, min_depth);
 
                 if extrema_t.is_empty() {
                     result.push(PathEl::CurveTo(p1, p2, p3));
@@ -296,7 +311,8 @@ fn insert_extrema(path: &BezPath) -> BezPath {
 }
 
 /// Find t values where a cubic bezier has horizontal or vertical extrema.
-fn find_extrema_t(cubic: &CubicBez) -> Vec<f64> {
+/// Skips extrema shallower than `min_depth` font units.
+fn find_extrema_t(cubic: &CubicBez, min_depth: f64) -> Vec<f64> {
     let mut ts = Vec::new();
     let threshold = 0.01;
 
@@ -307,6 +323,9 @@ fn find_extrema_t(cubic: &CubicBez) -> Vec<f64> {
             (cubic.p0.y, cubic.p1.y, cubic.p2.y, cubic.p3.y)
         };
 
+        let v0 = if axis == 0 { cubic.p0.x } else { cubic.p0.y };
+        let v3 = if axis == 0 { cubic.p3.x } else { cubic.p3.y };
+
         // Derivative: At^2 + Bt + C = 0
         let da = -3.0 * a + 9.0 * b - 9.0 * c + 3.0 * d;
         let db = 6.0 * a - 12.0 * b + 6.0 * c;
@@ -316,7 +335,16 @@ fn find_extrema_t(cubic: &CubicBez) -> Vec<f64> {
             if db.abs() > 1e-10 {
                 let t = -dc / db;
                 if t > threshold && t < 1.0 - threshold {
-                    ts.push(t);
+                    // Check depth: does the extremum extend meaningfully beyond endpoints?
+                    let pt = cubic.eval(t);
+                    let vt = if axis == 0 { pt.x } else { pt.y };
+                    let max_ep = v0.max(v3);
+                    let min_ep = v0.min(v3);
+                    if (vt > max_ep && vt - max_ep >= min_depth)
+                        || (vt < min_ep && min_ep - vt >= min_depth)
+                    {
+                        ts.push(t);
+                    }
                 }
             }
         } else {
@@ -325,7 +353,15 @@ fn find_extrema_t(cubic: &CubicBez) -> Vec<f64> {
                 let sq = disc.sqrt();
                 for t in [(-db + sq) / (2.0 * da), (-db - sq) / (2.0 * da)] {
                     if t > threshold && t < 1.0 - threshold {
-                        ts.push(t);
+                        let pt = cubic.eval(t);
+                        let vt = if axis == 0 { pt.x } else { pt.y };
+                        let max_ep = v0.max(v3);
+                        let min_ep = v0.min(v3);
+                        if (vt > max_ep && vt - max_ep >= min_depth)
+                            || (vt < min_ep && min_ep - vt >= min_depth)
+                        {
+                            ts.push(t);
+                        }
                     }
                 }
             }
@@ -354,6 +390,166 @@ fn subdivide_cubic(cubic: &CubicBez, t: f64) -> (CubicBez, CubicBez) {
 
 fn lerp(a: Point, b: Point, t: f64) -> Point {
     Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup: curves-to-lines, collinear merging, tiny segment removal
+// ---------------------------------------------------------------------------
+
+/// Clean up a path: convert nearly-straight curves to lines,
+/// merge collinear consecutive line segments, remove tiny segments.
+fn cleanup(path: &BezPath, tolerance: f64) -> BezPath {
+    let path = curves_to_lines(path, tolerance);
+    let path = merge_collinear_lines(&path, tolerance);
+    let path = remove_tiny_segments(&path, tolerance);
+    path
+}
+
+/// Distance from point P to the line defined by A and B.
+fn point_line_dist(p: Point, a: Point, b: Point) -> f64 {
+    let ab = Vec2::new(b.x - a.x, b.y - a.y);
+    let ap = Vec2::new(p.x - a.x, p.y - a.y);
+    let len_sq = ab.x * ab.x + ab.y * ab.y;
+    if len_sq < 1e-10 {
+        return ap.hypot();
+    }
+    (ab.x * ap.y - ab.y * ap.x).abs() / len_sq.sqrt()
+}
+
+/// Convert cubic curves whose control points are nearly on the chord to lines.
+fn curves_to_lines(path: &BezPath, tolerance: f64) -> BezPath {
+    let mut result = BezPath::new();
+    let mut current = Point::ZERO;
+
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                result.move_to(p);
+                current = p;
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                let d1 = point_line_dist(p1, current, p3);
+                let d2 = point_line_dist(p2, current, p3);
+                if d1 < tolerance && d2 < tolerance {
+                    result.line_to(p3);
+                } else {
+                    result.push(PathEl::CurveTo(p1, p2, p3));
+                }
+                current = p3;
+            }
+            PathEl::LineTo(p) => {
+                result.line_to(p);
+                current = p;
+            }
+            PathEl::QuadTo(p1, p2) => {
+                result.push(PathEl::QuadTo(p1, p2));
+                current = p2;
+            }
+            PathEl::ClosePath => {
+                result.push(PathEl::ClosePath);
+            }
+        }
+    }
+    result
+}
+
+/// Merge consecutive collinear line segments into single lines.
+fn merge_collinear_lines(path: &BezPath, tolerance: f64) -> BezPath {
+    let mut result = BezPath::new();
+    let mut prev_oncurve = Point::ZERO;
+    let mut pending_target: Option<Point> = None;
+
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                if let Some(lp) = pending_target.take() {
+                    result.line_to(lp);
+                }
+                result.move_to(p);
+                prev_oncurve = p;
+            }
+            PathEl::LineTo(p) => {
+                if let Some(lp) = pending_target {
+                    let dist = point_line_dist(lp, prev_oncurve, p);
+                    if dist < tolerance {
+                        // Collinear — extend to p, skip the intermediate point
+                        pending_target = Some(p);
+                    } else {
+                        // Not collinear — emit the pending point, start new
+                        result.line_to(lp);
+                        prev_oncurve = lp;
+                        pending_target = Some(p);
+                    }
+                } else {
+                    pending_target = Some(p);
+                }
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                if let Some(lp) = pending_target.take() {
+                    result.line_to(lp);
+                }
+                result.push(PathEl::CurveTo(p1, p2, p3));
+                prev_oncurve = p3;
+            }
+            PathEl::QuadTo(p1, p2) => {
+                if let Some(lp) = pending_target.take() {
+                    result.line_to(lp);
+                }
+                result.push(PathEl::QuadTo(p1, p2));
+                prev_oncurve = p2;
+            }
+            PathEl::ClosePath => {
+                if let Some(lp) = pending_target.take() {
+                    result.line_to(lp);
+                }
+                result.push(PathEl::ClosePath);
+            }
+        }
+    }
+    if let Some(lp) = pending_target {
+        result.line_to(lp);
+    }
+    result
+}
+
+/// Remove segments where the on-curve points are nearly coincident.
+fn remove_tiny_segments(path: &BezPath, tolerance: f64) -> BezPath {
+    let mut result = BezPath::new();
+    let mut current = Point::ZERO;
+
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                result.move_to(p);
+                current = p;
+            }
+            PathEl::LineTo(p) => {
+                let dist = ((p.x - current.x).powi(2) + (p.y - current.y).powi(2)).sqrt();
+                if dist >= tolerance {
+                    result.line_to(p);
+                    current = p;
+                }
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                let dist = ((p3.x - current.x).powi(2) + (p3.y - current.y).powi(2)).sqrt();
+                if dist >= tolerance {
+                    result.push(PathEl::CurveTo(p1, p2, p3));
+                    current = p3;
+                }
+            }
+            PathEl::QuadTo(p1, p2) => {
+                let dist = ((p2.x - current.x).powi(2) + (p2.y - current.y).powi(2)).sqrt();
+                if dist >= tolerance {
+                    result.push(PathEl::QuadTo(p1, p2));
+                    current = p2;
+                }
+            }
+            PathEl::ClosePath => {
+                result.push(PathEl::ClosePath);
+            }
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

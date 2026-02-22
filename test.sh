@@ -22,5 +22,5 @@ cargo run -- \
     --target-height 1088 \
     --y-offset=-256 \
     --grid 2 \
-    --accuracy 1.0 \
+    --accuracy 8.0 \
     --corner-threshold 30

@@ -70,8 +70,9 @@ fn fit_one(contour: &AnnotatedContour, image_height: u32, config: &TracingConfig
             let p = scaled[end_idx];
             path.line_to(Point::new(p.0, p.1));
         } else {
-            // RDP simplify, then fit curves
-            let simplified = rdp_simplify(&segment, config.rdp_epsilon);
+            // Smooth, RDP simplify, then fit curves
+            let smoothed = smooth_segment(&segment, config.smooth_iterations);
+            let simplified = rdp_simplify(&smoothed, config.rdp_epsilon);
             let fitted = fit_segment(&simplified, config.fit_accuracy);
 
             // Append fitted elements (skip the MoveTo)
@@ -87,7 +88,8 @@ fn fit_one(contour: &AnnotatedContour, image_height: u32, config: &TracingConfig
 
 /// Fit a smooth closed contour (no corners detected).
 fn fit_smooth_closed(points: &[(f64, f64)], config: &TracingConfig) -> BezPath {
-    let simplified = rdp_simplify(points, config.rdp_epsilon);
+    let smoothed = smooth_closed(points, config.smooth_iterations);
+    let simplified = rdp_simplify(&smoothed, config.rdp_epsilon);
 
     // Build a BezPath of line segments, then simplify with kurbo
     let mut line_path = BezPath::new();
@@ -99,11 +101,21 @@ fn fit_smooth_closed(points: &[(f64, f64)], config: &TracingConfig) -> BezPath {
         line_path.push(PathEl::ClosePath);
     }
 
+    // Two-pass fitting: first pass converts noisy polyline to smooth curves,
+    // second pass re-simplifies the smooth curves to minimum segments.
     let sbp = SimplifyBezPath::new(line_path.elements().iter().copied());
-    fit_to_bezpath_opt(&sbp, config.fit_accuracy)
+    let first_pass = fit_to_bezpath_opt(&sbp, config.fit_accuracy);
+
+    let sbp2 = SimplifyBezPath::new(first_pass.elements().iter().copied());
+    fit_to_bezpath_opt(&sbp2, config.fit_accuracy)
 }
 
 /// Fit cubic beziers to an open segment (between two corners).
+///
+/// Uses two-pass fitting: first pass fits curves to the noisy polyline,
+/// second pass re-simplifies those smooth curves to the minimum number
+/// of segments. This works because smooth curves simplify far better
+/// than noisy pixel polylines.
 fn fit_segment(points: &[(f64, f64)], accuracy: f64) -> BezPath {
     let mut line_path = BezPath::new();
     if let Some(&first) = points.first() {
@@ -113,8 +125,13 @@ fn fit_segment(points: &[(f64, f64)], accuracy: f64) -> BezPath {
         }
     }
 
+    // Pass 1: polyline → curves (may be many segments due to pixel noise)
     let sbp = SimplifyBezPath::new(line_path.elements().iter().copied());
-    fit_to_bezpath_opt(&sbp, accuracy)
+    let first_pass = fit_to_bezpath_opt(&sbp, accuracy);
+
+    // Pass 2: smooth curves → minimal curves
+    let sbp2 = SimplifyBezPath::new(first_pass.elements().iter().copied());
+    fit_to_bezpath_opt(&sbp2, accuracy)
 }
 
 /// Extract a cyclic sub-sequence of points from `start` to `end` (inclusive).
@@ -152,6 +169,45 @@ fn rdp_simplify(points: &[(f64, f64)], epsilon: f64) -> Vec<(f64, f64)> {
         .into_iter()
         .map(|c| (c.x, c.y))
         .collect()
+}
+
+/// Smooth a closed polyline with iterative neighbor averaging.
+/// Removes pixel staircase noise while preserving overall shape.
+fn smooth_closed(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
+    if iterations == 0 || points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut pts = points.to_vec();
+    let n = pts.len();
+    for _ in 0..iterations {
+        let prev = pts.clone();
+        for i in 0..n {
+            let p = prev[(i + n - 1) % n];
+            let c = prev[i];
+            let nx = prev[(i + 1) % n];
+            pts[i] = ((p.0 + c.0 + nx.0) / 3.0, (p.1 + c.1 + nx.1) / 3.0);
+        }
+    }
+    pts
+}
+
+/// Smooth an open polyline segment, preserving the endpoints (corners).
+fn smooth_segment(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
+    if iterations == 0 || points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut pts = points.to_vec();
+    let n = pts.len();
+    for _ in 0..iterations {
+        let prev = pts.clone();
+        for i in 1..n - 1 {
+            pts[i] = (
+                (prev[i - 1].0 + prev[i].0 + prev[i + 1].0) / 3.0,
+                (prev[i - 1].1 + prev[i].1 + prev[i + 1].1) / 3.0,
+            );
+        }
+    }
+    pts
 }
 
 /// Scale a pixel coordinate to font units with Y-flip.
