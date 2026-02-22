@@ -1,0 +1,33 @@
+[package]
+name = "img2bez"
+version = "0.1.0"
+edition = "2021"
+description = "Bitmap image to font-ready bezier contours"
+license = "MIT"
+
+[lib]
+name = "img2bez"
+path = "src/lib.rs"
+
+[[bin]]
+name = "img2bez"
+path = "src/bin/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+image = "0.25"
+imageproc = "0.25"
+kurbo = "0.13"
+geo = "0.28"
+thiserror = "2"
+
+# Optional: output backends
+norad = { version = "0.18", features = ["kurbo"], optional = true }
+
+# Optional: CLI
+clap = { version = "4", features = ["derive"], optional = true }
+
+[features]
+default = ["ufo", "cli"]
+ufo = ["norad"]
+cli = ["clap", "ufo"]
