@@ -24,6 +24,12 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
             .collect();
     }
 
+    // Snap handles at extrema to exact H/V (type design best practice)
+    result = result
+        .iter()
+        .map(|p| enforce_extrema_handles(p))
+        .collect();
+
     // Clean up: convert near-straight curves to lines, merge collinear lines,
     // remove tiny segments
     let tol = if config.grid > 0 {
@@ -257,9 +263,90 @@ enum SegType {
 }
 
 // ---------------------------------------------------------------------------
-// Extrema insertion
+// Enforce H/V handles at extrema (after grid snapping)
 // ---------------------------------------------------------------------------
 
+/// Snap handles at extrema points to be exactly horizontal or vertical.
+///
+/// After grid snapping, handles at extrema may drift slightly off H/V.
+/// This function identifies extrema by comparing each on-curve point to its
+/// neighbors and snaps the adjacent control points.
+fn enforce_extrema_handles(path: &BezPath) -> BezPath {
+    let mut elements: Vec<PathEl> = path.elements().to_vec();
+
+    // Collect on-curve points and their element indices
+    let mut on_curve: Vec<(Point, usize)> = Vec::new(); // (point, elem_index)
+
+    for (idx, el) in elements.iter().enumerate() {
+        match el {
+            PathEl::MoveTo(p)
+            | PathEl::LineTo(p)
+            | PathEl::CurveTo(_, _, p)
+            | PathEl::QuadTo(_, p) => {
+                on_curve.push((*p, idx));
+            }
+            _ => {}
+        }
+    }
+
+    let np = on_curve.len();
+    if np < 3 {
+        return path.clone();
+    }
+
+    for i in 0..np {
+        let (pt, _elem_idx) = on_curve[i];
+        let (prev, _) = on_curve[(i + np - 1) % np];
+        let (next, _) = on_curve[(i + 1) % np];
+
+        let is_y_extreme = (pt.y >= prev.y && pt.y >= next.y && (pt.y > prev.y || pt.y > next.y))
+            || (pt.y <= prev.y && pt.y <= next.y && (pt.y < prev.y || pt.y < next.y));
+
+        let is_x_extreme = (pt.x >= prev.x && pt.x >= next.x && (pt.x > prev.x || pt.x > next.x))
+            || (pt.x <= prev.x && pt.x <= next.x && (pt.x < prev.x || pt.x < next.x));
+
+        // Don't snap if both axes are extreme (would create zero-length handles)
+        if is_y_extreme && is_x_extreme {
+            continue;
+        }
+
+        if is_y_extreme {
+            // Snap incoming handle (c2 of this point's element) to horizontal
+            let idx = on_curve[i].1;
+            if let PathEl::CurveTo(c1, c2, p) = elements[idx] {
+                elements[idx] = PathEl::CurveTo(c1, Point::new(c2.x, pt.y), p);
+            }
+            // Snap outgoing handle (c1 of next point's element) to horizontal
+            let next_i = (i + 1) % np;
+            let next_idx = on_curve[next_i].1;
+            if let PathEl::CurveTo(c1, c2, p) = elements[next_idx] {
+                elements[next_idx] = PathEl::CurveTo(Point::new(c1.x, pt.y), c2, p);
+            }
+        }
+
+        if is_x_extreme {
+            // Snap incoming handle to vertical
+            let idx = on_curve[i].1;
+            if let PathEl::CurveTo(c1, c2, p) = elements[idx] {
+                elements[idx] = PathEl::CurveTo(c1, Point::new(pt.x, c2.y), p);
+            }
+            // Snap outgoing handle to vertical
+            let next_i = (i + 1) % np;
+            let next_idx = on_curve[next_i].1;
+            if let PathEl::CurveTo(c1, c2, p) = elements[next_idx] {
+                elements[next_idx] = PathEl::CurveTo(Point::new(pt.x, c1.y), c2, p);
+            }
+        }
+    }
+
+    BezPath::from_vec(elements)
+}
+
+// ---------------------------------------------------------------------------
+// Extrema insertion (kept as fallback, not called by default pipeline)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
 fn insert_extrema(path: &BezPath, min_depth: f64) -> BezPath {
     let mut result = BezPath::new();
     let mut current = Point::ZERO;
@@ -312,6 +399,7 @@ fn insert_extrema(path: &BezPath, min_depth: f64) -> BezPath {
 
 /// Find t values where a cubic bezier has horizontal or vertical extrema.
 /// Skips extrema shallower than `min_depth` font units.
+#[allow(dead_code)]
 fn find_extrema_t(cubic: &CubicBez, min_depth: f64) -> Vec<f64> {
     let mut ts = Vec::new();
     let threshold = 0.01;
@@ -373,6 +461,7 @@ fn find_extrema_t(cubic: &CubicBez, min_depth: f64) -> Vec<f64> {
     ts
 }
 
+#[allow(dead_code)]
 fn subdivide_cubic(cubic: &CubicBez, t: f64) -> (CubicBez, CubicBez) {
     // De Casteljau subdivision
     let p01 = lerp(cubic.p0, cubic.p1, t);
@@ -388,6 +477,7 @@ fn subdivide_cubic(cubic: &CubicBez, t: f64) -> (CubicBez, CubicBez) {
     )
 }
 
+#[allow(dead_code)]
 fn lerp(a: Point, b: Point, t: f64) -> Point {
     Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
 }

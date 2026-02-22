@@ -4,6 +4,7 @@ pub mod contour;
 pub mod corners;
 pub mod error;
 pub mod postprocess;
+pub mod refit;
 pub mod simplify;
 
 #[cfg(feature = "ufo")]
