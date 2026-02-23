@@ -21,7 +21,7 @@ struct Cli {
     #[arg(short = 'u', long)]
     unicode: Option<String>,
 
-    /// Advance width (auto-computed from bounds if omitted)
+    /// Advance width (auto-computed if omitted)
     #[arg(short = 'w', long)]
     width: Option<f64>,
 
@@ -33,23 +33,23 @@ struct Cli {
     #[arg(long, default_value = "0")]
     chamfer: f64,
 
-    /// Curve fitting accuracy in font units (smaller = more precise, more points)
+    /// Curve fitting accuracy in font units
     #[arg(long, default_value = "8.0")]
     accuracy: f64,
 
-    /// RDP simplification epsilon in font units (higher = fewer input points)
+    /// RDP simplification epsilon in font units
     #[arg(long, default_value = "8.0")]
     rdp_epsilon: f64,
 
-    /// Corner detection angle threshold in degrees
+    /// Corner detection threshold in degrees
     #[arg(long, default_value = "30")]
     corner_threshold: f64,
 
-    /// Target height in font units (image height maps to this)
+    /// Target height in font units
     #[arg(long, default_value = "1000")]
     target_height: f64,
 
-    /// Y offset after scaling (typically the descender value)
+    /// Y offset after scaling (typically descender)
     #[arg(long, default_value = "0", allow_hyphen_values = true)]
     y_offset: f64,
 
@@ -61,23 +61,27 @@ struct Cli {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let mut config = TracingConfig::default();
-    config.grid = cli.grid;
-    config.chamfer_size = cli.chamfer;
-    config.fit_accuracy = cli.accuracy;
-    config.rdp_epsilon = cli.rdp_epsilon;
-    config.corner_angle_threshold = cli.corner_threshold.to_radians();
-    config.advance_width = cli.width;
-    config.target_height = cli.target_height;
-    config.y_offset = cli.y_offset;
-    config.invert = cli.invert;
-
-    if let Some(ref u) = cli.unicode {
-        let cp = u32::from_str_radix(u, 16)?;
-        if let Some(c) = char::from_u32(cp) {
-            config.codepoints = vec![c];
+    let codepoints = match &cli.unicode {
+        Some(u) => {
+            let cp = u32::from_str_radix(u, 16)?;
+            char::from_u32(cp).into_iter().collect()
         }
-    }
+        None => vec![],
+    };
+
+    let config = TracingConfig {
+        grid: cli.grid,
+        chamfer_size: cli.chamfer,
+        fit_accuracy: cli.accuracy,
+        rdp_epsilon: cli.rdp_epsilon,
+        corner_angle_threshold: cli.corner_threshold.to_radians(),
+        advance_width: cli.width,
+        target_height: cli.target_height,
+        y_offset: cli.y_offset,
+        invert: cli.invert,
+        codepoints,
+        ..TracingConfig::default()
+    };
 
     img2bez::trace_into_ufo(&cli.input, &cli.name, &cli.output, &config)?;
 

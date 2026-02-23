@@ -9,10 +9,8 @@ use crate::error::TraceError;
 pub struct RawContour {
     /// Points in pixel coordinates (y=0 is top of image).
     pub points: Vec<(f64, f64)>,
-    /// Whether this is an outer contour or a hole (counter).
+    /// Whether this is an outer contour or a hole.
     pub is_outer: bool,
-    /// Index of the parent contour in the returned Vec (for nesting hierarchy).
-    pub parent: Option<usize>,
 }
 
 /// Detect contours in a binary image.
@@ -31,7 +29,6 @@ pub fn detect(gray: &GrayImage, config: &TracingConfig) -> Result<Vec<RawContour
             RawContour {
                 points,
                 is_outer: c.border_type == BorderType::Outer,
-                parent: c.parent,
             }
         })
         .collect();

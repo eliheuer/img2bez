@@ -21,7 +21,8 @@ pub fn load_and_threshold(path: &Path, config: &TracingConfig) -> Result<GrayIma
         ThresholdMethod::Otsu => otsu_level(&img),
     };
 
-    let mut binary = imageproc::contrast::threshold(&img, threshold, imageproc::contrast::ThresholdType::Binary);
+    let mut binary =
+        imageproc::contrast::threshold(&img, threshold, imageproc::contrast::ThresholdType::Binary);
 
     if config.invert {
         for pixel in binary.pixels_mut() {

@@ -5,8 +5,6 @@ use crate::contour::RawContour;
 #[derive(Debug, Clone)]
 pub struct AnnotatedContour {
     pub points: Vec<AnnotatedPoint>,
-    pub is_outer: bool,
-    pub parent: Option<usize>,
 }
 
 /// A point with a corner/smooth classification.
@@ -26,22 +24,17 @@ pub fn detect(contours: &[RawContour], config: &TracingConfig) -> Vec<AnnotatedC
     contours
         .iter()
         .map(|c| {
-            let points =
-                annotate_corners(&c.points, config.corner_angle_threshold, config.corner_window);
-            AnnotatedContour {
-                points,
-                is_outer: c.is_outer,
-                parent: c.parent,
-            }
+            let points = annotate_corners(
+                &c.points,
+                config.corner_angle_threshold,
+                config.corner_window,
+            );
+            AnnotatedContour { points }
         })
         .collect()
 }
 
-fn annotate_corners(
-    points: &[(f64, f64)],
-    threshold: f64,
-    window: usize,
-) -> Vec<AnnotatedPoint> {
+fn annotate_corners(points: &[(f64, f64)], threshold: f64, window: usize) -> Vec<AnnotatedPoint> {
     let n = points.len();
     if n < 3 {
         return points

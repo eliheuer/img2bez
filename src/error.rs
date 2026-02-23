@@ -1,6 +1,8 @@
 use thiserror::Error;
 
+/// Errors that can occur during image tracing.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum TraceError {
     #[error("failed to load image: {0}")]
     ImageLoad(String),

@@ -1,19 +1,20 @@
+//! Curve fitting: annotated pixel contours → BezPaths.
+//!
+//! Per contour:
+//! 1. Scale pixel coordinates to font units (Y-flip)
+//! 2. Split at detected corners
+//! 3. RDP-simplify each smooth segment
+//! 4. Two-pass cubic bezier fitting via kurbo
+
 use geo::{LineString, Simplify};
 use kurbo::{fit_to_bezpath_opt, simplify::SimplifyBezPath, BezPath, PathEl, Point};
 
 use crate::config::TracingConfig;
 use crate::corners::AnnotatedContour;
 
-/// Fit cubic bezier curves to annotated contours.
+/// Fit cubic curves to annotated contours.
 ///
-/// The pipeline:
-/// 1. Scale pixel coordinates to font units (with Y-flip)
-/// 2. Split each contour at detected corners
-/// 3. RDP-simplify each smooth segment
-/// 4. Fit optimal cubic beziers via kurbo
-///
-/// `image_height` is the source image height in pixels, used for Y-flip.
-/// Returns one `BezPath` per input contour.
+/// Returns one `BezPath` per contour, in font units.
 pub fn fit(
     contours: &[AnnotatedContour],
     image_height: u32,
@@ -31,15 +32,13 @@ fn fit_one(contour: &AnnotatedContour, image_height: u32, config: &TracingConfig
         return BezPath::new();
     }
 
-    // Step 1: Scale all points to font units
     let scaled: Vec<(f64, f64)> = contour
         .points
         .iter()
         .map(|p| scale_point(p.x, p.y, image_height, config))
         .collect();
 
-    // Step 2: Find corner indices
-    let corner_indices: Vec<usize> = contour
+    let corners: Vec<usize> = contour
         .points
         .iter()
         .enumerate()
@@ -47,38 +46,32 @@ fn fit_one(contour: &AnnotatedContour, image_height: u32, config: &TracingConfig
         .map(|(i, _)| i)
         .collect();
 
-    // No corners: fit the entire contour as one smooth closed curve
-    if corner_indices.is_empty() {
+    if corners.is_empty() {
         return fit_smooth_closed(&scaled, config);
     }
 
-    // Step 3: Build BezPath by walking corner-to-corner segments
     let mut path = BezPath::new();
-    let first = scaled[corner_indices[0]];
+    let first = scaled[corners[0]];
     path.move_to(Point::new(first.0, first.1));
 
-    let nc = corner_indices.len();
+    let nc = corners.len();
     for ci in 0..nc {
-        let start_idx = corner_indices[ci];
-        let end_idx = corner_indices[(ci + 1) % nc];
+        let start = corners[ci];
+        let end = corners[(ci + 1) % nc];
+        let seg = extract_segment(&scaled, start, end, n);
 
-        // Extract the segment of points between these two corners
-        let segment = extract_segment(&scaled, start_idx, end_idx, n);
-
-        if segment.len() <= 2 {
-            // Straight line to next corner
-            let p = scaled[end_idx];
+        if seg.len() <= 2 {
+            let p = scaled[end];
             path.line_to(Point::new(p.0, p.1));
-        } else {
-            // Smooth, RDP simplify, then fit curves
-            let smoothed = smooth_segment(&segment, config.smooth_iterations);
-            let simplified = rdp_simplify(&smoothed, config.rdp_epsilon);
-            let fitted = fit_segment(&simplified, config.fit_accuracy);
+            continue;
+        }
 
-            // Append fitted elements (skip the MoveTo)
-            for el in fitted.elements().iter().skip(1) {
-                path.push(*el);
-            }
+        let smoothed = smooth_segment(&seg, config.smooth_iterations);
+        let simplified = rdp_simplify(&smoothed, config.rdp_epsilon);
+        let fitted = fit_segment(&simplified, config.fit_accuracy);
+
+        for el in fitted.elements().iter().skip(1) {
+            path.push(*el);
         }
     }
 
@@ -86,93 +79,87 @@ fn fit_one(contour: &AnnotatedContour, image_height: u32, config: &TracingConfig
     path
 }
 
-/// Fit a smooth closed contour (no corners detected).
+// ── Two-pass fitting ─────────────────────────────────────
+
+/// Fit a smooth closed contour (no corners).
 fn fit_smooth_closed(points: &[(f64, f64)], config: &TracingConfig) -> BezPath {
     let smoothed = smooth_closed(points, config.smooth_iterations);
     let simplified = rdp_simplify(&smoothed, config.rdp_epsilon);
-
-    // Build a BezPath of line segments, then simplify with kurbo
-    let mut line_path = BezPath::new();
-    if let Some(&first) = simplified.first() {
-        line_path.move_to(Point::new(first.0, first.1));
-        for &(x, y) in &simplified[1..] {
-            line_path.line_to(Point::new(x, y));
-        }
-        line_path.push(PathEl::ClosePath);
-    }
-
-    // Two-pass fitting: first pass converts noisy polyline to smooth curves,
-    // second pass re-simplifies the smooth curves to minimum segments.
-    let sbp = SimplifyBezPath::new(line_path.elements().iter().copied());
-    let first_pass = fit_to_bezpath_opt(&sbp, config.fit_accuracy);
-
-    let sbp2 = SimplifyBezPath::new(first_pass.elements().iter().copied());
-    fit_to_bezpath_opt(&sbp2, config.fit_accuracy)
+    let path = points_to_path(&simplified, true);
+    two_pass_fit(&path, config.fit_accuracy)
 }
 
-/// Fit cubic beziers to an open segment (between two corners).
-///
-/// Uses two-pass fitting: first pass fits curves to the noisy polyline,
-/// second pass re-simplifies those smooth curves to the minimum number
-/// of segments. This works because smooth curves simplify far better
-/// than noisy pixel polylines.
+/// Fit cubics to an open segment between two corners.
 fn fit_segment(points: &[(f64, f64)], accuracy: f64) -> BezPath {
-    let mut line_path = BezPath::new();
-    if let Some(&first) = points.first() {
-        line_path.move_to(Point::new(first.0, first.1));
-        for &(x, y) in &points[1..] {
-            line_path.line_to(Point::new(x, y));
-        }
-    }
-
-    // Pass 1: polyline → curves (may be many segments due to pixel noise)
-    let sbp = SimplifyBezPath::new(line_path.elements().iter().copied());
-    let first_pass = fit_to_bezpath_opt(&sbp, accuracy);
-
-    // Pass 2: smooth curves → minimal curves
-    let sbp2 = SimplifyBezPath::new(first_pass.elements().iter().copied());
-    fit_to_bezpath_opt(&sbp2, accuracy)
+    let path = points_to_path(points, false);
+    two_pass_fit(&path, accuracy)
 }
 
-/// Extract a cyclic sub-sequence of points from `start` to `end` (inclusive).
+/// Two-pass fitting: polyline → curves → minimal curves.
+///
+/// Smooth curves simplify far better than noisy pixel
+/// polylines, so a second pass dramatically reduces points.
+fn two_pass_fit(path: &BezPath, accuracy: f64) -> BezPath {
+    let pass1 = fit_to_bezpath_opt(
+        &SimplifyBezPath::new(path.elements().iter().copied()),
+        accuracy,
+    );
+    fit_to_bezpath_opt(
+        &SimplifyBezPath::new(pass1.elements().iter().copied()),
+        accuracy,
+    )
+}
+
+/// Convert (x, y) tuples to a line-segment BezPath.
+fn points_to_path(points: &[(f64, f64)], closed: bool) -> BezPath {
+    let mut path = BezPath::new();
+    if let Some(&(x, y)) = points.first() {
+        path.move_to(Point::new(x, y));
+        for &(x, y) in &points[1..] {
+            path.line_to(Point::new(x, y));
+        }
+        if closed {
+            path.push(PathEl::ClosePath);
+        }
+    }
+    path
+}
+
+// ── Helpers ──────────────────────────────────────────────
+
+/// Extract a cyclic sub-sequence from `start` to `end`.
 fn extract_segment(
     points: &[(f64, f64)],
     start: usize,
     end: usize,
     total: usize,
 ) -> Vec<(f64, f64)> {
-    let mut segment = Vec::new();
+    let mut seg = Vec::new();
     let mut i = start;
     loop {
-        segment.push(points[i]);
+        seg.push(points[i]);
         if i == end {
             break;
         }
         i = (i + 1) % total;
     }
-    segment
+    seg
 }
 
-/// Simplify a polyline using the Ramer-Douglas-Peucker algorithm.
+/// RDP polyline simplification.
 fn rdp_simplify(points: &[(f64, f64)], epsilon: f64) -> Vec<(f64, f64)> {
     if points.len() <= 2 || epsilon <= 0.0 {
         return points.to_vec();
     }
-
-    let line_string: LineString<f64> =
-        LineString::from(points.iter().map(|&(x, y)| (x, y)).collect::<Vec<_>>());
-
-    let simplified = line_string.simplify(&epsilon);
-
-    simplified
+    LineString::from(points.to_vec())
+        .simplify(&epsilon)
         .into_inner()
         .into_iter()
         .map(|c| (c.x, c.y))
         .collect()
 }
 
-/// Smooth a closed polyline with iterative neighbor averaging.
-/// Removes pixel staircase noise while preserving overall shape.
+/// Smooth a closed polyline with neighbor averaging.
 fn smooth_closed(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
     if iterations == 0 || points.len() < 3 {
         return points.to_vec();
@@ -182,16 +169,16 @@ fn smooth_closed(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
     for _ in 0..iterations {
         let prev = pts.clone();
         for i in 0..n {
-            let p = prev[(i + n - 1) % n];
-            let c = prev[i];
-            let nx = prev[(i + 1) % n];
-            pts[i] = ((p.0 + c.0 + nx.0) / 3.0, (p.1 + c.1 + nx.1) / 3.0);
+            let a = prev[(i + n - 1) % n];
+            let b = prev[i];
+            let c = prev[(i + 1) % n];
+            pts[i] = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
         }
     }
     pts
 }
 
-/// Smooth an open polyline segment, preserving the endpoints (corners).
+/// Smooth an open polyline, preserving endpoints.
 fn smooth_segment(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
     if iterations == 0 || points.len() < 3 {
         return points.to_vec();
@@ -201,22 +188,16 @@ fn smooth_segment(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
     for _ in 0..iterations {
         let prev = pts.clone();
         for i in 1..n - 1 {
-            pts[i] = (
-                (prev[i - 1].0 + prev[i].0 + prev[i + 1].0) / 3.0,
-                (prev[i - 1].1 + prev[i].1 + prev[i + 1].1) / 3.0,
-            );
+            let a = prev[i - 1];
+            let b = prev[i];
+            let c = prev[i + 1];
+            pts[i] = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
         }
     }
     pts
 }
 
-/// Scale a pixel coordinate to font units with Y-flip.
-///
-/// Pixel coords: (0,0) = top-left, y increases downward.
-/// Font coords: y increases upward.
-///
-/// The image height is scaled to `target_height` font units,
-/// then shifted by `y_offset` to align the baseline.
+/// Scale pixel coordinates to font units with Y-flip.
 fn scale_point(px_x: f64, px_y: f64, image_height: u32, config: &TracingConfig) -> (f64, f64) {
     let ih = image_height as f64;
     let scale = config.target_height / ih;

@@ -29,5 +29,5 @@ clap = { version = "4", features = ["derive"], optional = true }
 
 [features]
 default = ["ufo", "cli"]
-ufo = ["norad"]
-cli = ["clap", "ufo"]
+ufo = ["dep:norad"]
+cli = ["dep:clap", "ufo"]

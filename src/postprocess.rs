@@ -1,125 +1,81 @@
+//! Post-processing pipeline for traced bezier contours.
+//!
+//! Transforms raw fitted curves into font-ready outlines:
+//! contour direction, extrema insertion, grid snapping,
+//! H/V handle correction, and optional chamfers.
+
+use std::f64::consts::{FRAC_PI_2, PI};
+
 use kurbo::{BezPath, CubicBez, ParamCurve, PathEl, Point, Vec2};
 
 use crate::config::TracingConfig;
 
-/// Apply all post-processing steps to a set of traced contours.
+/// Apply all post-processing steps to traced contours.
 pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
     let mut result = paths.to_vec();
 
     if config.fix_direction {
-        result = fix_contour_directions(&result);
+        result = fix_directions(&result);
     }
 
     if config.add_extrema {
-        result = result
-            .iter()
-            .map(|p| insert_extrema(p, config.min_extrema_depth))
-            .collect();
+        let depth = config.min_extrema_depth;
+        result = result.iter().map(|p| insert_extrema(p, depth)).collect();
     }
 
     if config.grid > 0 {
-        result = result
-            .iter()
-            .map(|p| snap_to_grid(p, config.grid))
-            .collect();
+        let g = config.grid as f64;
+        result = result.iter().map(|p| snap_to_grid(p, g)).collect();
     }
 
-    // Snap handles at extrema to exact H/V (type design best practice)
+    // Snap handles within 15° of H/V to exact H/V.
+    result = result.iter().map(|p| snap_hv_handles(p, 15.0)).collect();
+
+    // Convert near-straight curves to lines.
+    let line_tol = if config.grid > 0 {
+        (config.grid as f64 * 3.0).max(6.0)
+    } else {
+        6.0
+    };
     result = result
         .iter()
-        .map(|p| enforce_extrema_handles(p))
+        .map(|p| curves_to_lines(p, line_tol))
         .collect();
 
-    // Clean up: convert near-straight curves to lines, merge collinear lines,
-    // remove tiny segments
-    let tol = if config.grid > 0 {
+    // Merge collinear lines, remove tiny segments.
+    let tight = if config.grid > 0 {
         config.grid as f64
     } else {
         1.0
     };
-    result = result.iter().map(|p| cleanup(p, tol)).collect();
+    result = result
+        .iter()
+        .map(|p| {
+            let p = merge_collinear(p, tight);
+            remove_tiny(&p, tight)
+        })
+        .collect();
 
     if config.chamfer_size > 0.0 {
-        result = result
-            .iter()
-            .map(|p| add_chamfers(p, config.chamfer_size, config.chamfer_min_edge))
-            .collect();
+        let size = config.chamfer_size;
+        let min = config.chamfer_min_edge;
+        result = result.iter().map(|p| chamfer(p, size, min)).collect();
     }
 
     result
 }
 
-// ---------------------------------------------------------------------------
-// Grid snapping
-// ---------------------------------------------------------------------------
+// ── Contour direction ────────────────────────────────────
 
-fn snap_to_grid(path: &BezPath, grid: i32) -> BezPath {
-    let g = grid as f64;
-    BezPath::from_vec(
-        path.elements()
-            .iter()
-            .map(|el| match *el {
-                PathEl::MoveTo(p) => PathEl::MoveTo(snap_pt(p, g)),
-                PathEl::LineTo(p) => PathEl::LineTo(snap_pt(p, g)),
-                PathEl::CurveTo(p1, p2, p3) => {
-                    PathEl::CurveTo(snap_pt(p1, g), snap_pt(p2, g), snap_pt(p3, g))
-                }
-                PathEl::QuadTo(p1, p2) => PathEl::QuadTo(snap_pt(p1, g), snap_pt(p2, g)),
-                PathEl::ClosePath => PathEl::ClosePath,
-            })
-            .collect(),
-    )
-}
-
-fn snap_pt(p: Point, grid: f64) -> Point {
-    Point::new((p.x / grid).round() * grid, (p.y / grid).round() * grid)
-}
-
-// ---------------------------------------------------------------------------
-// Contour direction
-// ---------------------------------------------------------------------------
-
-/// Signed area of a BezPath (using on-curve points only for speed).
-/// Positive = CCW, negative = CW.
-fn path_signed_area(path: &BezPath) -> f64 {
-    let mut area = 0.0;
-    let mut first = Point::ZERO;
-    let mut current = Point::ZERO;
-
-    for el in path.elements() {
-        match *el {
-            PathEl::MoveTo(p) => {
-                first = p;
-                current = p;
-            }
-            PathEl::LineTo(p) => {
-                area += current.x * p.y - p.x * current.y;
-                current = p;
-            }
-            PathEl::CurveTo(_, _, p) => {
-                area += current.x * p.y - p.x * current.y;
-                current = p;
-            }
-            PathEl::QuadTo(_, p) => {
-                area += current.x * p.y - p.x * current.y;
-                current = p;
-            }
-            PathEl::ClosePath => {
-                area += current.x * first.y - first.x * current.y;
-            }
-        }
-    }
-    area / 2.0
-}
-
-fn fix_contour_directions(paths: &[BezPath]) -> Vec<BezPath> {
+/// Ensure outer contours are CCW, counters are CW.
+fn fix_directions(paths: &[BezPath]) -> Vec<BezPath> {
     if paths.is_empty() {
         return vec![];
     }
 
-    // Find the contour with the largest absolute area — that's the outer.
-    let areas: Vec<f64> = paths.iter().map(|p| path_signed_area(p)).collect();
-    let outer_idx = areas
+    let areas: Vec<f64> = paths.iter().map(signed_area).collect();
+
+    let outer = areas
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
@@ -130,14 +86,13 @@ fn fix_contour_directions(paths: &[BezPath]) -> Vec<BezPath> {
         .iter()
         .enumerate()
         .map(|(i, path)| {
-            let area = areas[i];
-            let is_outer = i == outer_idx;
-
-            // Outer should be CCW (positive area), counters CW (negative)
-            if is_outer && area < 0.0 {
-                reverse_bezpath(path)
-            } else if !is_outer && area > 0.0 {
-                reverse_bezpath(path)
+            let should_flip = if i == outer {
+                areas[i] < 0.0
+            } else {
+                areas[i] > 0.0
+            };
+            if should_flip {
+                reverse_path(path)
             } else {
                 path.clone()
             }
@@ -145,313 +100,220 @@ fn fix_contour_directions(paths: &[BezPath]) -> Vec<BezPath> {
         .collect()
 }
 
-fn reverse_bezpath(path: &BezPath) -> BezPath {
-    // Collect on-curve points and segment types in reverse
-    let elements = path.elements();
+/// Signed area via shoelace (on-curve points only).
+fn signed_area(path: &BezPath) -> f64 {
+    let mut area = 0.0;
+    let mut first = Point::ZERO;
+    let mut cur = Point::ZERO;
 
-    // Extract all points from the path
-    let mut segments: Vec<PathEl> = Vec::new();
-    let mut first_pt = Point::ZERO;
-
-    for el in elements {
+    for el in path.elements() {
         match *el {
             PathEl::MoveTo(p) => {
-                first_pt = p;
+                first = p;
+                cur = p;
             }
-            other => segments.push(other),
+            PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => {
+                area += cur.x * p.y - p.x * cur.y;
+                cur = p;
+            }
+            PathEl::ClosePath => {
+                area += cur.x * first.y - first.x * cur.y;
+            }
         }
     }
+    area / 2.0
+}
 
-    // Remove trailing ClosePath if present
-    let had_close = matches!(segments.last(), Some(PathEl::ClosePath));
-    if had_close {
-        segments.pop();
-    }
+/// Reverse a BezPath's winding direction.
+fn reverse_path(path: &BezPath) -> BezPath {
+    let mut first = Point::ZERO;
+    let mut segs: Vec<(Point, Seg)> = Vec::new();
+    let mut closed = false;
 
-    // Reverse the segments and swap control point order
-    let mut reversed = BezPath::new();
-
-    // The new start is the last on-curve point
-    let last_oncurve = segments
-        .iter()
-        .rev()
-        .find_map(|el| match *el {
-            PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => Some(p),
-            _ => None,
-        })
-        .unwrap_or(first_pt);
-
-    reversed.move_to(last_oncurve);
-
-    for seg in segments.iter().rev() {
-        match *seg {
-            PathEl::LineTo(_) => {
-                // The target of this reversed segment is the previous segment's endpoint
-                // (or first_pt for the first segment)
-            }
-            _ => {}
-        }
-    }
-
-    // Simpler approach: flatten to points, reverse, rebuild
-    // This works for line-only and mixed paths
-    let mut points_and_types: Vec<(Point, SegType)> = Vec::new();
-
-    for seg in &segments {
-        match *seg {
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => first = p,
             PathEl::LineTo(p) => {
-                points_and_types.push((p, SegType::Line));
+                segs.push((p, Seg::Line));
             }
-            PathEl::CurveTo(c1, c2, p) => {
-                points_and_types.push((p, SegType::Curve(c1, c2)));
+            PathEl::CurveTo(a, b, p) => {
+                segs.push((p, Seg::Curve(a, b)));
             }
-            PathEl::QuadTo(c1, p) => {
-                points_and_types.push((p, SegType::Quad(c1)));
+            PathEl::QuadTo(a, p) => {
+                segs.push((p, Seg::Quad(a)));
             }
-            _ => {}
+            PathEl::ClosePath => closed = true,
         }
     }
 
-    // Build reversed path
-    let mut rev = BezPath::new();
-    if points_and_types.is_empty() {
-        rev.move_to(first_pt);
-        if had_close {
-            rev.push(PathEl::ClosePath);
+    let mut out = BezPath::new();
+    if segs.is_empty() {
+        out.move_to(first);
+        if closed {
+            out.push(PathEl::ClosePath);
         }
-        return rev;
+        return out;
     }
 
-    // Start at the last point
-    let last = points_and_types.last().unwrap().0;
-    rev.move_to(last);
+    out.move_to(segs.last().unwrap().0);
 
-    // Walk backwards
-    for i in (0..points_and_types.len()).rev() {
-        let target = if i == 0 {
-            first_pt
-        } else {
-            points_and_types[i - 1].0
-        };
-
-        match points_and_types[i].1 {
-            SegType::Line => {
-                rev.line_to(target);
+    for i in (0..segs.len()).rev() {
+        let target = if i == 0 { first } else { segs[i - 1].0 };
+        match segs[i].1 {
+            Seg::Line => out.line_to(target),
+            Seg::Curve(a, b) => {
+                out.push(PathEl::CurveTo(b, a, target));
             }
-            SegType::Curve(c1, c2) => {
-                // Reverse control point order
-                rev.push(PathEl::CurveTo(c2, c1, target));
-            }
-            SegType::Quad(c1) => {
-                rev.push(PathEl::QuadTo(c1, target));
+            Seg::Quad(a) => {
+                out.push(PathEl::QuadTo(a, target));
             }
         }
     }
 
-    if had_close {
-        rev.push(PathEl::ClosePath);
+    if closed {
+        out.push(PathEl::ClosePath);
     }
-
-    rev
+    out
 }
 
 #[derive(Clone, Copy)]
-enum SegType {
+enum Seg {
     Line,
     Curve(Point, Point),
     Quad(Point),
 }
 
-// ---------------------------------------------------------------------------
-// Enforce H/V handles at extrema (after grid snapping)
-// ---------------------------------------------------------------------------
+// ── H/V handle snapping ─────────────────────────────────
 
-/// Snap handles at extrema points to be exactly horizontal or vertical.
-///
-/// After grid snapping, handles at extrema may drift slightly off H/V.
-/// This function identifies extrema by comparing each on-curve point to its
-/// neighbors and snaps the adjacent control points.
-fn enforce_extrema_handles(path: &BezPath) -> BezPath {
-    let mut elements: Vec<PathEl> = path.elements().to_vec();
+/// Snap handles within `deg` of H/V to exact H/V.
+fn snap_hv_handles(path: &BezPath, threshold_deg: f64) -> BezPath {
+    let thresh = threshold_deg.to_radians();
+    let mut els: Vec<PathEl> = path.elements().to_vec();
+    let mut prev = Point::ZERO;
 
-    // Collect on-curve points and their element indices
-    let mut on_curve: Vec<(Point, usize)> = Vec::new(); // (point, elem_index)
-
-    for (idx, el) in elements.iter().enumerate() {
+    for el in &mut els {
         match el {
-            PathEl::MoveTo(p)
-            | PathEl::LineTo(p)
-            | PathEl::CurveTo(_, _, p)
-            | PathEl::QuadTo(_, p) => {
-                on_curve.push((*p, idx));
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => {
+                prev = *p;
             }
-            _ => {}
+            PathEl::CurveTo(c1, c2, p3) => {
+                *c1 = snap_handle(*c1, prev, thresh);
+                *c2 = snap_handle(*c2, *p3, thresh);
+                prev = *p3;
+            }
+            PathEl::QuadTo(_, p) => prev = *p,
+            PathEl::ClosePath => {}
         }
     }
 
-    let np = on_curve.len();
-    if np < 3 {
-        return path.clone();
-    }
-
-    for i in 0..np {
-        let (pt, _elem_idx) = on_curve[i];
-        let (prev, _) = on_curve[(i + np - 1) % np];
-        let (next, _) = on_curve[(i + 1) % np];
-
-        let is_y_extreme = (pt.y >= prev.y && pt.y >= next.y && (pt.y > prev.y || pt.y > next.y))
-            || (pt.y <= prev.y && pt.y <= next.y && (pt.y < prev.y || pt.y < next.y));
-
-        let is_x_extreme = (pt.x >= prev.x && pt.x >= next.x && (pt.x > prev.x || pt.x > next.x))
-            || (pt.x <= prev.x && pt.x <= next.x && (pt.x < prev.x || pt.x < next.x));
-
-        // Don't snap if both axes are extreme (would create zero-length handles)
-        if is_y_extreme && is_x_extreme {
-            continue;
-        }
-
-        if is_y_extreme {
-            // Snap incoming handle (c2 of this point's element) to horizontal
-            let idx = on_curve[i].1;
-            if let PathEl::CurveTo(c1, c2, p) = elements[idx] {
-                elements[idx] = PathEl::CurveTo(c1, Point::new(c2.x, pt.y), p);
-            }
-            // Snap outgoing handle (c1 of next point's element) to horizontal
-            let next_i = (i + 1) % np;
-            let next_idx = on_curve[next_i].1;
-            if let PathEl::CurveTo(c1, c2, p) = elements[next_idx] {
-                elements[next_idx] = PathEl::CurveTo(Point::new(c1.x, pt.y), c2, p);
-            }
-        }
-
-        if is_x_extreme {
-            // Snap incoming handle to vertical
-            let idx = on_curve[i].1;
-            if let PathEl::CurveTo(c1, c2, p) = elements[idx] {
-                elements[idx] = PathEl::CurveTo(c1, Point::new(pt.x, c2.y), p);
-            }
-            // Snap outgoing handle to vertical
-            let next_i = (i + 1) % np;
-            let next_idx = on_curve[next_i].1;
-            if let PathEl::CurveTo(c1, c2, p) = elements[next_idx] {
-                elements[next_idx] = PathEl::CurveTo(Point::new(pt.x, c1.y), c2, p);
-            }
-        }
-    }
-
-    BezPath::from_vec(elements)
+    BezPath::from_vec(els)
 }
 
-// ---------------------------------------------------------------------------
-// Extrema insertion (kept as fallback, not called by default pipeline)
-// ---------------------------------------------------------------------------
+/// Snap a handle to exact H/V if it's close enough.
+fn snap_handle(handle: Point, anchor: Point, threshold: f64) -> Point {
+    let dx = handle.x - anchor.x;
+    let dy = handle.y - anchor.y;
+    if dx * dx + dy * dy < 1e-12 {
+        return handle;
+    }
 
-#[allow(dead_code)]
+    let angle = dy.atan2(dx).abs(); // 0..PI
+
+    if angle < threshold || (PI - angle) < threshold {
+        return Point::new(handle.x, anchor.y);
+    }
+    if (angle - FRAC_PI_2).abs() < threshold {
+        return Point::new(anchor.x, handle.y);
+    }
+    handle
+}
+
+// ── Grid snapping ────────────────────────────────────────
+
+fn snap_to_grid(path: &BezPath, g: f64) -> BezPath {
+    BezPath::from_vec(
+        path.elements()
+            .iter()
+            .map(|el| match *el {
+                PathEl::MoveTo(p) => PathEl::MoveTo(snap(p, g)),
+                PathEl::LineTo(p) => PathEl::LineTo(snap(p, g)),
+                PathEl::CurveTo(a, b, p) => PathEl::CurveTo(snap(a, g), snap(b, g), snap(p, g)),
+                PathEl::QuadTo(a, p) => PathEl::QuadTo(snap(a, g), snap(p, g)),
+                PathEl::ClosePath => PathEl::ClosePath,
+            })
+            .collect(),
+    )
+}
+
+fn snap(p: Point, g: f64) -> Point {
+    Point::new((p.x / g).round() * g, (p.y / g).round() * g)
+}
+
+// ── Extrema insertion ────────────────────────────────────
+
+/// Insert on-curve points at H/V extrema of cubic curves.
+///
+/// Only inserts when the extremum extends beyond the
+/// endpoints by at least `min_depth` font units.
 fn insert_extrema(path: &BezPath, min_depth: f64) -> BezPath {
-    let mut result = BezPath::new();
-    let mut current = Point::ZERO;
+    let mut out = BezPath::new();
+    let mut cur = Point::ZERO;
 
     for el in path.elements() {
         match *el {
             PathEl::MoveTo(p) => {
-                result.move_to(p);
-                current = p;
+                out.move_to(p);
+                cur = p;
             }
             PathEl::LineTo(p) => {
-                result.line_to(p);
-                current = p;
+                out.line_to(p);
+                cur = p;
             }
-            PathEl::CurveTo(p1, p2, p3) => {
-                let cubic = CubicBez::new(current, p1, p2, p3);
-                let extrema_t = find_extrema_t(&cubic, min_depth);
-
-                if extrema_t.is_empty() {
-                    result.push(PathEl::CurveTo(p1, p2, p3));
+            PathEl::CurveTo(a, b, p) => {
+                let c = CubicBez::new(cur, a, b, p);
+                let ts = extrema_t_values(&c, min_depth);
+                if ts.is_empty() {
+                    out.push(PathEl::CurveTo(a, b, p));
                 } else {
-                    // Split at all extrema t values
-                    let mut remaining = cubic;
-                    let mut prev_t = 0.0;
-
-                    for &t in &extrema_t {
-                        // Remap t to the remaining portion
-                        let local_t = (t - prev_t) / (1.0 - prev_t);
-                        let (left, right) = subdivide_cubic(&remaining, local_t);
-
-                        result.push(PathEl::CurveTo(left.p1, left.p2, left.p3));
-                        remaining = right;
-                        prev_t = t;
-                    }
-                    result.push(PathEl::CurveTo(remaining.p1, remaining.p2, remaining.p3));
+                    split_at_ts(&mut out, &c, &ts);
                 }
-                current = p3;
+                cur = p;
             }
-            PathEl::QuadTo(p1, p2) => {
-                result.push(PathEl::QuadTo(p1, p2));
-                current = p2;
+            PathEl::QuadTo(a, p) => {
+                out.push(PathEl::QuadTo(a, p));
+                cur = p;
             }
             PathEl::ClosePath => {
-                result.push(PathEl::ClosePath);
+                out.push(PathEl::ClosePath);
             }
         }
     }
-    result
+    out
 }
 
-/// Find t values where a cubic bezier has horizontal or vertical extrema.
-/// Skips extrema shallower than `min_depth` font units.
-#[allow(dead_code)]
-fn find_extrema_t(cubic: &CubicBez, min_depth: f64) -> Vec<f64> {
+/// Find t-values of H/V extrema on a cubic.
+fn extrema_t_values(c: &CubicBez, min_depth: f64) -> Vec<f64> {
     let mut ts = Vec::new();
-    let threshold = 0.01;
+    let margin = 0.01;
 
     for axis in 0..2 {
-        let (a, b, c, d) = if axis == 0 {
-            (cubic.p0.x, cubic.p1.x, cubic.p2.x, cubic.p3.x)
+        let (v0, v1, v2, v3) = if axis == 0 {
+            (c.p0.x, c.p1.x, c.p2.x, c.p3.x)
         } else {
-            (cubic.p0.y, cubic.p1.y, cubic.p2.y, cubic.p3.y)
+            (c.p0.y, c.p1.y, c.p2.y, c.p3.y)
         };
 
-        let v0 = if axis == 0 { cubic.p0.x } else { cubic.p0.y };
-        let v3 = if axis == 0 { cubic.p3.x } else { cubic.p3.y };
+        // Derivative: At² + Bt + C = 0
+        let a = -3.0 * v0 + 9.0 * v1 - 9.0 * v2 + 3.0 * v3;
+        let b = 6.0 * v0 - 12.0 * v1 + 6.0 * v2;
+        let cc = -3.0 * v0 + 3.0 * v1;
 
-        // Derivative: At^2 + Bt + C = 0
-        let da = -3.0 * a + 9.0 * b - 9.0 * c + 3.0 * d;
-        let db = 6.0 * a - 12.0 * b + 6.0 * c;
-        let dc = -3.0 * a + 3.0 * b;
-
-        if da.abs() < 1e-10 {
-            if db.abs() > 1e-10 {
-                let t = -dc / db;
-                if t > threshold && t < 1.0 - threshold {
-                    // Check depth: does the extremum extend meaningfully beyond endpoints?
-                    let pt = cubic.eval(t);
-                    let vt = if axis == 0 { pt.x } else { pt.y };
-                    let max_ep = v0.max(v3);
-                    let min_ep = v0.min(v3);
-                    if (vt > max_ep && vt - max_ep >= min_depth)
-                        || (vt < min_ep && min_ep - vt >= min_depth)
-                    {
-                        ts.push(t);
-                    }
-                }
+        for t in solve_quadratic(a, b, cc) {
+            if t <= margin || t >= 1.0 - margin {
+                continue;
             }
-        } else {
-            let disc = db * db - 4.0 * da * dc;
-            if disc >= 0.0 {
-                let sq = disc.sqrt();
-                for t in [(-db + sq) / (2.0 * da), (-db - sq) / (2.0 * da)] {
-                    if t > threshold && t < 1.0 - threshold {
-                        let pt = cubic.eval(t);
-                        let vt = if axis == 0 { pt.x } else { pt.y };
-                        let max_ep = v0.max(v3);
-                        let min_ep = v0.min(v3);
-                        if (vt > max_ep && vt - max_ep >= min_depth)
-                            || (vt < min_ep && min_ep - vt >= min_depth)
-                        {
-                            ts.push(t);
-                        }
-                    }
-                }
+            if extremum_depth(c, t, axis) >= min_depth {
+                ts.push(t);
             }
         }
     }
@@ -461,42 +323,115 @@ fn find_extrema_t(cubic: &CubicBez, min_depth: f64) -> Vec<f64> {
     ts
 }
 
-#[allow(dead_code)]
-fn subdivide_cubic(cubic: &CubicBez, t: f64) -> (CubicBez, CubicBez) {
-    // De Casteljau subdivision
-    let p01 = lerp(cubic.p0, cubic.p1, t);
-    let p12 = lerp(cubic.p1, cubic.p2, t);
-    let p23 = lerp(cubic.p2, cubic.p3, t);
-    let p012 = lerp(p01, p12, t);
-    let p123 = lerp(p12, p23, t);
-    let p0123 = lerp(p012, p123, t);
+/// How far an extremum extends beyond the endpoints.
+fn extremum_depth(c: &CubicBez, t: f64, axis: usize) -> f64 {
+    let pt = c.eval(t);
+    let vt = if axis == 0 { pt.x } else { pt.y };
+    let v0 = if axis == 0 { c.p0.x } else { c.p0.y };
+    let v3 = if axis == 0 { c.p3.x } else { c.p3.y };
+    let (lo, hi) = min_max(v0, v3);
 
+    if vt > hi {
+        vt - hi
+    } else if vt < lo {
+        lo - vt
+    } else {
+        0.0
+    }
+}
+
+fn min_max(a: f64, b: f64) -> (f64, f64) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Solve At² + Bt + C = 0, returning real roots.
+fn solve_quadratic(a: f64, b: f64, c: f64) -> Vec<f64> {
+    if a.abs() < 1e-10 {
+        if b.abs() > 1e-10 {
+            return vec![-c / b];
+        }
+        return vec![];
+    }
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return vec![];
+    }
+    let sq = disc.sqrt();
+    vec![(-b + sq) / (2.0 * a), (-b - sq) / (2.0 * a)]
+}
+
+/// Split a cubic at sorted t-values, appending to `out`.
+fn split_at_ts(out: &mut BezPath, cubic: &CubicBez, ts: &[f64]) {
+    let mut rest = *cubic;
+    let mut prev_t = 0.0;
+
+    for &t in ts {
+        let local = (t - prev_t) / (1.0 - prev_t);
+        let (left, right) = subdivide(rest, local);
+        out.push(PathEl::CurveTo(left.p1, left.p2, left.p3));
+        rest = right;
+        prev_t = t;
+    }
+    out.push(PathEl::CurveTo(rest.p1, rest.p2, rest.p3));
+}
+
+/// De Casteljau subdivision at parameter t.
+fn subdivide(c: CubicBez, t: f64) -> (CubicBez, CubicBez) {
+    let ab = lerp(c.p0, c.p1, t);
+    let bc = lerp(c.p1, c.p2, t);
+    let cd = lerp(c.p2, c.p3, t);
+    let abc = lerp(ab, bc, t);
+    let bcd = lerp(bc, cd, t);
+    let mid = lerp(abc, bcd, t);
     (
-        CubicBez::new(cubic.p0, p01, p012, p0123),
-        CubicBez::new(p0123, p123, p23, cubic.p3),
+        CubicBez::new(c.p0, ab, abc, mid),
+        CubicBez::new(mid, bcd, cd, c.p3),
     )
 }
 
-#[allow(dead_code)]
 fn lerp(a: Point, b: Point, t: f64) -> Point {
     Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
 }
 
-// ---------------------------------------------------------------------------
-// Cleanup: curves-to-lines, collinear merging, tiny segment removal
-// ---------------------------------------------------------------------------
+// ── Cleanup ──────────────────────────────────────────────
 
-/// Clean up a path: convert nearly-straight curves to lines,
-/// merge collinear consecutive line segments, remove tiny segments.
-fn cleanup(path: &BezPath, tolerance: f64) -> BezPath {
-    let path = curves_to_lines(path, tolerance);
-    let path = merge_collinear_lines(&path, tolerance);
-    let path = remove_tiny_segments(&path, tolerance);
-    path
+/// Convert curves where both handles hug the chord.
+fn curves_to_lines(path: &BezPath, tol: f64) -> BezPath {
+    let mut out = BezPath::new();
+    let mut cur = Point::ZERO;
+
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                out.move_to(p);
+                cur = p;
+            }
+            PathEl::CurveTo(a, b, p) => {
+                let d1 = point_to_line_dist(a, cur, p);
+                let d2 = point_to_line_dist(b, cur, p);
+                if d1 < tol && d2 < tol {
+                    out.line_to(p);
+                } else {
+                    out.push(PathEl::CurveTo(a, b, p));
+                }
+                cur = p;
+            }
+            PathEl::LineTo(p) => {
+                out.line_to(p);
+                cur = p;
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
-/// Distance from point P to the line defined by A and B.
-fn point_line_dist(p: Point, a: Point, b: Point) -> f64 {
+/// Distance from point P to line through A→B.
+fn point_to_line_dist(p: Point, a: Point, b: Point) -> f64 {
     let ab = Vec2::new(b.x - a.x, b.y - a.y);
     let ap = Vec2::new(p.x - a.x, p.y - a.y);
     let len_sq = ab.x * ab.x + ab.y * ab.y;
@@ -506,238 +441,172 @@ fn point_line_dist(p: Point, a: Point, b: Point) -> f64 {
     (ab.x * ap.y - ab.y * ap.x).abs() / len_sq.sqrt()
 }
 
-/// Convert cubic curves whose control points are nearly on the chord to lines.
-fn curves_to_lines(path: &BezPath, tolerance: f64) -> BezPath {
-    let mut result = BezPath::new();
-    let mut current = Point::ZERO;
+/// Merge consecutive collinear line segments.
+fn merge_collinear(path: &BezPath, tol: f64) -> BezPath {
+    let mut out = BezPath::new();
+    let mut anchor = Point::ZERO;
+    let mut pending: Option<Point> = None;
 
     for el in path.elements() {
         match *el {
             PathEl::MoveTo(p) => {
-                result.move_to(p);
-                current = p;
+                flush(&mut out, &mut pending);
+                out.move_to(p);
+                anchor = p;
             }
-            PathEl::CurveTo(p1, p2, p3) => {
-                let d1 = point_line_dist(p1, current, p3);
-                let d2 = point_line_dist(p2, current, p3);
-                if d1 < tolerance && d2 < tolerance {
-                    result.line_to(p3);
-                } else {
-                    result.push(PathEl::CurveTo(p1, p2, p3));
+            PathEl::LineTo(p) => match pending {
+                Some(mid) if point_to_line_dist(mid, anchor, p) < tol => {
+                    pending = Some(p);
                 }
-                current = p3;
+                Some(mid) => {
+                    out.line_to(mid);
+                    anchor = mid;
+                    pending = Some(p);
+                }
+                None => {
+                    pending = Some(p);
+                }
+            },
+            PathEl::CurveTo(a, b, p) => {
+                flush(&mut out, &mut pending);
+                out.push(PathEl::CurveTo(a, b, p));
+                anchor = p;
             }
-            PathEl::LineTo(p) => {
-                result.line_to(p);
-                current = p;
-            }
-            PathEl::QuadTo(p1, p2) => {
-                result.push(PathEl::QuadTo(p1, p2));
-                current = p2;
+            PathEl::QuadTo(a, p) => {
+                flush(&mut out, &mut pending);
+                out.push(PathEl::QuadTo(a, p));
+                anchor = p;
             }
             PathEl::ClosePath => {
-                result.push(PathEl::ClosePath);
+                flush(&mut out, &mut pending);
+                out.push(PathEl::ClosePath);
             }
         }
     }
-    result
+    flush(&mut out, &mut pending);
+    out
 }
 
-/// Merge consecutive collinear line segments into single lines.
-fn merge_collinear_lines(path: &BezPath, tolerance: f64) -> BezPath {
-    let mut result = BezPath::new();
-    let mut prev_oncurve = Point::ZERO;
-    let mut pending_target: Option<Point> = None;
+fn flush(out: &mut BezPath, pending: &mut Option<Point>) {
+    if let Some(p) = pending.take() {
+        out.line_to(p);
+    }
+}
+
+/// Remove segments shorter than `tol`.
+fn remove_tiny(path: &BezPath, tol: f64) -> BezPath {
+    let mut out = BezPath::new();
+    let mut cur = Point::ZERO;
+    let tol_sq = tol * tol;
 
     for el in path.elements() {
         match *el {
             PathEl::MoveTo(p) => {
-                if let Some(lp) = pending_target.take() {
-                    result.line_to(lp);
-                }
-                result.move_to(p);
-                prev_oncurve = p;
+                out.move_to(p);
+                cur = p;
             }
             PathEl::LineTo(p) => {
-                if let Some(lp) = pending_target {
-                    let dist = point_line_dist(lp, prev_oncurve, p);
-                    if dist < tolerance {
-                        // Collinear — extend to p, skip the intermediate point
-                        pending_target = Some(p);
-                    } else {
-                        // Not collinear — emit the pending point, start new
-                        result.line_to(lp);
-                        prev_oncurve = lp;
-                        pending_target = Some(p);
-                    }
-                } else {
-                    pending_target = Some(p);
+                if dist_sq(cur, p) >= tol_sq {
+                    out.line_to(p);
+                    cur = p;
                 }
             }
-            PathEl::CurveTo(p1, p2, p3) => {
-                if let Some(lp) = pending_target.take() {
-                    result.line_to(lp);
-                }
-                result.push(PathEl::CurveTo(p1, p2, p3));
-                prev_oncurve = p3;
-            }
-            PathEl::QuadTo(p1, p2) => {
-                if let Some(lp) = pending_target.take() {
-                    result.line_to(lp);
-                }
-                result.push(PathEl::QuadTo(p1, p2));
-                prev_oncurve = p2;
-            }
-            PathEl::ClosePath => {
-                if let Some(lp) = pending_target.take() {
-                    result.line_to(lp);
-                }
-                result.push(PathEl::ClosePath);
-            }
-        }
-    }
-    if let Some(lp) = pending_target {
-        result.line_to(lp);
-    }
-    result
-}
-
-/// Remove segments where the on-curve points are nearly coincident.
-fn remove_tiny_segments(path: &BezPath, tolerance: f64) -> BezPath {
-    let mut result = BezPath::new();
-    let mut current = Point::ZERO;
-
-    for el in path.elements() {
-        match *el {
-            PathEl::MoveTo(p) => {
-                result.move_to(p);
-                current = p;
-            }
-            PathEl::LineTo(p) => {
-                let dist = ((p.x - current.x).powi(2) + (p.y - current.y).powi(2)).sqrt();
-                if dist >= tolerance {
-                    result.line_to(p);
-                    current = p;
+            PathEl::CurveTo(a, b, p) => {
+                if dist_sq(cur, p) >= tol_sq {
+                    out.push(PathEl::CurveTo(a, b, p));
+                    cur = p;
                 }
             }
-            PathEl::CurveTo(p1, p2, p3) => {
-                let dist = ((p3.x - current.x).powi(2) + (p3.y - current.y).powi(2)).sqrt();
-                if dist >= tolerance {
-                    result.push(PathEl::CurveTo(p1, p2, p3));
-                    current = p3;
-                }
-            }
-            PathEl::QuadTo(p1, p2) => {
-                let dist = ((p2.x - current.x).powi(2) + (p2.y - current.y).powi(2)).sqrt();
-                if dist >= tolerance {
-                    result.push(PathEl::QuadTo(p1, p2));
-                    current = p2;
+            PathEl::QuadTo(a, p) => {
+                if dist_sq(cur, p) >= tol_sq {
+                    out.push(PathEl::QuadTo(a, p));
+                    cur = p;
                 }
             }
             PathEl::ClosePath => {
-                result.push(PathEl::ClosePath);
+                out.push(PathEl::ClosePath);
             }
         }
     }
-    result
+    out
 }
 
-// ---------------------------------------------------------------------------
-// Chamfer insertion
-// ---------------------------------------------------------------------------
+fn dist_sq(a: Point, b: Point) -> f64 {
+    (a.x - b.x).powi(2) + (a.y - b.y).powi(2)
+}
 
-fn add_chamfers(path: &BezPath, size: f64, min_edge: f64) -> BezPath {
-    let elements = path.elements();
+// ── Chamfers ─────────────────────────────────────────────
 
-    // Collect on-curve points with their types
-    let mut points: Vec<(Point, bool)> = Vec::new(); // (point, is_line_segment)
+/// Add 45° chamfers at line-line corners.
+fn chamfer(path: &BezPath, size: f64, min_edge: f64) -> BezPath {
     let mut first = Point::ZERO;
-    let mut has_close = false;
+    let mut pts: Vec<(Point, bool)> = Vec::new();
+    let mut closed = false;
 
-    for el in elements {
+    for el in path.elements() {
         match *el {
-            PathEl::MoveTo(p) => {
-                first = p;
-            }
-            PathEl::LineTo(p) => {
-                points.push((p, true));
-            }
-            PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => {
-                points.push((p, false));
-            }
-            PathEl::ClosePath => {
-                has_close = true;
-            }
+            PathEl::MoveTo(p) => first = p,
+            PathEl::LineTo(p) => pts.push((p, true)),
+            PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => pts.push((p, false)),
+            PathEl::ClosePath => closed = true,
         }
     }
 
-    if points.is_empty() {
+    if pts.is_empty() {
         return path.clone();
     }
 
-    // Insert first_pt at the beginning (it's the MoveTo target)
-    // For closed paths, the closing segment goes from last point to first_pt
-    let mut all_pts: Vec<(Point, bool)> = vec![(first, true)]; // assume line for the moveto
-    all_pts.extend_from_slice(&points);
+    let mut all = vec![(first, true)];
+    all.extend_from_slice(&pts);
+    let n = all.len();
 
-    let n = all_pts.len();
-    let mut result = BezPath::new();
-    let mut new_points: Vec<Point> = Vec::new();
-
+    let mut new_pts: Vec<Point> = Vec::new();
     for i in 0..n {
-        let (pt, is_line) = all_pts[i];
-        let (prev_pt, _) = all_pts[(i + n - 1) % n];
-        let (next_pt, next_is_line) = all_pts[(i + 1) % n];
+        let (pt, is_line) = all[i];
+        let (prev, _) = all[(i + n - 1) % n];
+        let (next, next_line) = all[(i + 1) % n];
 
-        // Only chamfer line-line corners
-        if !is_line || !next_is_line {
-            new_points.push(pt);
+        if !is_line || !next_line {
+            new_pts.push(pt);
             continue;
         }
 
-        let v_in = Vec2::new(pt.x - prev_pt.x, pt.y - prev_pt.y);
-        let v_out = Vec2::new(next_pt.x - pt.x, next_pt.y - pt.y);
+        let v_in = Vec2::new(pt.x - prev.x, pt.y - prev.y);
+        let v_out = Vec2::new(next.x - pt.x, next.y - pt.y);
         let len_in = v_in.hypot();
         let len_out = v_out.hypot();
 
         if len_in < min_edge || len_out < min_edge {
-            new_points.push(pt);
+            new_pts.push(pt);
             continue;
         }
 
-        // Check if there's a significant angle
         let dot = v_in.x * v_out.x + v_in.y * v_out.y;
-        let cos_angle = dot / (len_in * len_out);
-        if cos_angle.abs() > 0.95 {
-            // Nearly parallel, skip chamfer
-            new_points.push(pt);
+        let cos = dot / (len_in * len_out);
+        if cos.abs() > 0.95 {
+            new_pts.push(pt);
             continue;
         }
 
-        // Compute chamfer cut points
-        let before = Point::new(
+        new_pts.push(Point::new(
             pt.x - size * v_in.x / len_in,
             pt.y - size * v_in.y / len_in,
-        );
-        let after = Point::new(
+        ));
+        new_pts.push(Point::new(
             pt.x + size * v_out.x / len_out,
             pt.y + size * v_out.y / len_out,
-        );
-
-        new_points.push(before);
-        new_points.push(after);
+        ));
     }
 
-    // Rebuild BezPath from points (all lines for chamfered paths)
-    if let Some(&first) = new_points.first() {
-        result.move_to(first);
-        for &p in &new_points[1..] {
-            result.line_to(p);
+    let mut out = BezPath::new();
+    if let Some(&p) = new_pts.first() {
+        out.move_to(p);
+        for &p in &new_pts[1..] {
+            out.line_to(p);
         }
-        if has_close {
-            result.push(PathEl::ClosePath);
+        if closed {
+            out.push(PathEl::ClosePath);
         }
     }
-
-    result
+    out
 }

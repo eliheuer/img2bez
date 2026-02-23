@@ -1,7 +1,18 @@
 /// All tracing parameters in one struct.
-/// Designed to be serializable (for saving presets) and
-/// adjustable at runtime (for editor sliders).
-#[derive(Debug, Clone)]
+///
+/// Use `TracingConfig::default()` for sensible defaults,
+/// then override specific fields:
+///
+/// ```
+/// use img2bez::TracingConfig;
+///
+/// let config = TracingConfig {
+///     grid: 2,
+///     chamfer_size: 16.0,
+///     ..TracingConfig::default()
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq)]
 pub struct TracingConfig {
     // -- Bitmap stage --
     /// Threshold method for converting to binary.
@@ -67,7 +78,7 @@ pub struct TracingConfig {
 }
 
 /// Threshold method for converting a grayscale image to binary.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThresholdMethod {
     /// Fixed brightness threshold (0-255).
     Fixed(u8),
