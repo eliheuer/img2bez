@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "img2bez"
-path = "src/bin/main.rs"
+path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]

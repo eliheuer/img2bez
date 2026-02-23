@@ -15,14 +15,14 @@ use crate::corners::AnnotatedContour;
 /// Fit cubic curves to annotated contours.
 ///
 /// Returns one `BezPath` per contour, in font units.
-pub fn fit(
+pub fn curves(
     contours: &[AnnotatedContour],
     image_height: u32,
     config: &TracingConfig,
 ) -> Vec<BezPath> {
     contours
         .iter()
-        .map(|c| fit_one(c, image_height, config))
+        .map(|contour| fit_one(contour, image_height, config))
         .collect()
 }
 
@@ -54,19 +54,19 @@ fn fit_one(contour: &AnnotatedContour, image_height: u32, config: &TracingConfig
     let first = scaled[corners[0]];
     path.move_to(Point::new(first.0, first.1));
 
-    let nc = corners.len();
-    for ci in 0..nc {
+    let num_corners = corners.len();
+    for ci in 0..num_corners {
         let start = corners[ci];
-        let end = corners[(ci + 1) % nc];
-        let seg = extract_segment(&scaled, start, end, n);
+        let end = corners[(ci + 1) % num_corners];
+        let segment = extract_segment(&scaled, start, end, n);
 
-        if seg.len() <= 2 {
+        if segment.len() <= 2 {
             let p = scaled[end];
             path.line_to(Point::new(p.0, p.1));
             continue;
         }
 
-        let smoothed = smooth_segment(&seg, config.smooth_iterations);
+        let smoothed = smooth_segment(&segment, config.smooth_iterations);
         let simplified = rdp_simplify(&smoothed, config.rdp_epsilon);
         let fitted = fit_segment(&simplified, config.fit_accuracy);
 
@@ -134,16 +134,16 @@ fn extract_segment(
     end: usize,
     total: usize,
 ) -> Vec<(f64, f64)> {
-    let mut seg = Vec::new();
+    let mut result = Vec::new();
     let mut i = start;
     loop {
-        seg.push(points[i]);
+        result.push(points[i]);
         if i == end {
             break;
         }
         i = (i + 1) % total;
     }
-    seg
+    result
 }
 
 /// RDP polyline simplification.
@@ -155,7 +155,7 @@ fn rdp_simplify(points: &[(f64, f64)], epsilon: f64) -> Vec<(f64, f64)> {
         .simplify(&epsilon)
         .into_inner()
         .into_iter()
-        .map(|c| (c.x, c.y))
+        .map(|coord| (coord.x, coord.y))
         .collect()
 }
 
@@ -164,18 +164,18 @@ fn smooth_closed(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
     if iterations == 0 || points.len() < 3 {
         return points.to_vec();
     }
-    let mut pts = points.to_vec();
-    let n = pts.len();
+    let mut smoothed = points.to_vec();
+    let n = smoothed.len();
     for _ in 0..iterations {
-        let prev = pts.clone();
+        let previous = smoothed.clone();
         for i in 0..n {
-            let a = prev[(i + n - 1) % n];
-            let b = prev[i];
-            let c = prev[(i + 1) % n];
-            pts[i] = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
+            let a = previous[(i + n - 1) % n];
+            let b = previous[i];
+            let c = previous[(i + 1) % n];
+            smoothed[i] = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
         }
     }
-    pts
+    smoothed
 }
 
 /// Smooth an open polyline, preserving endpoints.
@@ -183,25 +183,25 @@ fn smooth_segment(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
     if iterations == 0 || points.len() < 3 {
         return points.to_vec();
     }
-    let mut pts = points.to_vec();
-    let n = pts.len();
+    let mut smoothed = points.to_vec();
+    let n = smoothed.len();
     for _ in 0..iterations {
-        let prev = pts.clone();
+        let previous = smoothed.clone();
         for i in 1..n - 1 {
-            let a = prev[i - 1];
-            let b = prev[i];
-            let c = prev[i + 1];
-            pts[i] = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
+            let a = previous[i - 1];
+            let b = previous[i];
+            let c = previous[i + 1];
+            smoothed[i] = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
         }
     }
-    pts
+    smoothed
 }
 
 /// Scale pixel coordinates to font units with Y-flip.
 fn scale_point(px_x: f64, px_y: f64, image_height: u32, config: &TracingConfig) -> (f64, f64) {
-    let ih = image_height as f64;
-    let scale = config.target_height / ih;
+    let height = image_height as f64;
+    let scale = config.target_height / height;
     let x = px_x * scale;
-    let y = (ih - px_y) * scale + config.y_offset;
+    let y = (height - px_y) * scale + config.y_offset;
     (x, y)
 }
