@@ -6,7 +6,10 @@ use kurbo::{Affine, BezPath, Shape, Vec2};
 ///
 /// When `grid > 0`, shifts are rounded to the grid so coordinates
 /// that were on-grid before repositioning stay on-grid after.
-pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> Vec<BezPath> {
+///
+/// Returns `(repositioned_paths, (dx, dy))` where (dx, dy) is the
+/// translation that was applied.
+pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> (Vec<BezPath>, (f64, f64)) {
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
     // Use on-curve point extremes (not tight bbox) to avoid fractional shifts.
@@ -25,7 +28,7 @@ pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> Vec<BezPath> {
         }
     }
     if min_x == f64::MAX {
-        return paths.to_vec();
+        return (paths.to_vec(), (0.0, 0.0));
     }
     let mut dx = lsb - min_x;
     let mut dy = -min_y;
@@ -34,7 +37,7 @@ pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> Vec<BezPath> {
         dx = (dx / g).round() * g;
         dy = (dy / g).round() * g;
     }
-    paths.iter().map(|path| translate(path, dx, dy)).collect()
+    (paths.iter().map(|path| translate(path, dx, dy)).collect(), (dx, dy))
 }
 
 /// Compute advance width from bounding box + right sidebearing.

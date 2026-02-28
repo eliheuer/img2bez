@@ -5,6 +5,9 @@
 
 use kurbo::{BezPath, CubicBez, ParamCurve, PathEl, Point, Vec2};
 
+/// Number of sample points along a curve for straightness checks.
+const CURVE_SAMPLES: usize = 8;
+
 /// Convert near-straight curves to line segments.
 ///
 /// Samples 8 points along the cubic and converts to a line if the maximum
@@ -42,9 +45,8 @@ pub fn curves_to_lines(path: &BezPath, tolerance: f64) -> BezPath {
 /// Check if a cubic curve deviates from its chord by less than `tolerance`.
 fn curve_is_straight(p0: Point, p1: Point, p2: Point, p3: Point, tolerance: f64) -> bool {
     let cubic = CubicBez::new(p0, p1, p2, p3);
-    let n = 8;
-    for i in 1..n {
-        let t = i as f64 / n as f64;
+    for i in 1..CURVE_SAMPLES {
+        let t = i as f64 / CURVE_SAMPLES as f64;
         let pt = cubic.eval(t);
         if point_to_line_dist(pt, p0, p3) > tolerance {
             return false;

@@ -19,17 +19,10 @@
 
 mod bitmap;
 mod config;
+mod geom;
 mod metrics;
 mod cleanup;
 mod vectorize;
-
-// Old pipeline modules — kept for reference, may be removed later.
-#[allow(dead_code)]
-mod corners;
-#[allow(dead_code)]
-mod fit;
-#[allow(dead_code)]
-mod trace;
 
 pub mod error;
 
@@ -38,6 +31,8 @@ pub mod ufo;
 
 #[cfg(feature = "ufo")]
 pub mod eval;
+
+pub mod render;
 
 // Re-export kurbo so downstream users get the same version
 // used by TraceResult.paths (Vec<kurbo::BezPath>).
@@ -49,6 +44,8 @@ pub use error::TraceError;
 use kurbo::{BezPath, PathEl};
 use std::path::Path;
 use std::time::Instant;
+
+use geom::signed_area;
 
 /// Whether a contour is an outer boundary or a hole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +63,9 @@ pub struct TraceResult {
     pub contour_types: Vec<ContourType>,
     /// Computed advance width in font units.
     pub advance_width: f64,
+    /// Translation (dx, dy) applied by the reposition step.
+    /// Needed to map font coordinates back to source image coordinates.
+    pub reposition_shift: (f64, f64),
 }
 
 /// Full pipeline: image path → font-ready bezier contours.
@@ -97,7 +97,12 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
     );
 
     // ── Post-processing ───────────────────────────────────
-    let paths = cleanup::process(&curves, config);
+    let paths = if std::env::var("IMG2BEZ_DEBUG_NO_CLEANUP").is_ok() {
+        eprintln!("  Debug       skipping cleanup");
+        curves.clone()
+    } else {
+        cleanup::process(&curves, config)
+    };
 
     let contour_types: Vec<ContourType> = paths
         .iter()
@@ -119,7 +124,7 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
     eprintln!("  Clean       {}", steps.join(" \u{00b7} "));
 
     // ── Metrics ───────────────────────────────────────────
-    let paths = metrics::reposition(&paths, config.lsb, config.grid);
+    let (paths, reposition_shift) = metrics::reposition(&paths, config.lsb, config.grid);
     let advance_width = config
         .advance_width
         .unwrap_or_else(|| metrics::advance_from_bounds(&paths, config.rsb));
@@ -138,27 +143,8 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
         paths,
         contour_types,
         advance_width,
+        reposition_shift,
     })
-}
-
-/// Signed area of a BezPath (on-curve points only, shoelace formula).
-fn signed_area(path: &BezPath) -> f64 {
-    let mut area = 0.0;
-    let mut first = kurbo::Point::ZERO;
-    let mut current = kurbo::Point::ZERO;
-    for el in path.elements() {
-        match *el {
-            PathEl::MoveTo(p) => { first = p; current = p; }
-            PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => {
-                area += current.x * p.y - p.x * current.y;
-                current = p;
-            }
-            PathEl::ClosePath => {
-                area += current.x * first.y - first.x * current.y;
-            }
-        }
-    }
-    area / 2.0
 }
 
 /// Count (curves, lines) segments in a set of BezPaths.

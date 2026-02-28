@@ -7,6 +7,12 @@ use std::f64::consts::{FRAC_PI_2, PI};
 
 use kurbo::{BezPath, CubicBez, ParamCurve, PathEl, Point};
 
+/// Number of sample points along a curve for deviation checks.
+const CURVE_SAMPLES: usize = 8;
+
+/// Threshold for considering a handle already H/V aligned (font units).
+const ALREADY_HV_THRESHOLD: f64 = 0.5;
+
 /// Snap all coordinates to a grid.
 pub fn to_grid(path: &BezPath, grid: f64) -> BezPath {
     let snap = |p: Point| -> Point {
@@ -131,6 +137,7 @@ pub fn force_hv_handles(path: &BezPath, max_deviation: f64) -> BezPath {
     let mut elements: Vec<PathEl> = path.elements().to_vec();
     let mut prev = Point::ZERO;
 
+    #[allow(clippy::needless_range_loop)]
     for idx in 0..elements.len() {
         match elements[idx] {
             PathEl::MoveTo(p) | PathEl::LineTo(p) => {
@@ -173,7 +180,8 @@ pub fn force_hv_handles(path: &BezPath, max_deviation: f64) -> BezPath {
 }
 
 fn is_already_hv(handle: Point, anchor: Point) -> bool {
-    (handle.x - anchor.x).abs() < 0.5 || (handle.y - anchor.y).abs() < 0.5
+    (handle.x - anchor.x).abs() < ALREADY_HV_THRESHOLD
+        || (handle.y - anchor.y).abs() < ALREADY_HV_THRESHOLD
 }
 
 /// Pick horizontal or vertical snap — whichever produces less deviation.
@@ -197,9 +205,9 @@ fn pick_best_snap(
     }
 }
 
-/// Max deviation between two cubics, sampled at 8 points.
+/// Max deviation between two cubics, sampled at evenly-spaced points.
 fn curve_deviation(a: &CubicBez, b: &CubicBez) -> f64 {
-    let n = 8;
+    let n = CURVE_SAMPLES;
     let mut max_d = 0.0f64;
     for i in 0..=n {
         let t = i as f64 / n as f64;

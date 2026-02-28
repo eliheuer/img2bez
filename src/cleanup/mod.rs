@@ -47,9 +47,9 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
     // Force remaining off-axis handles to H/V if curve distortion
     // stays within the grid tolerance.
     let hv_force_tol = if config.grid > 0 {
-        config.grid as f64 * 16.0
+        config.grid as f64 * 4.0
     } else {
-        32.0
+        8.0
     };
     result = result
         .iter()
@@ -70,9 +70,9 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
 
     // Snap nearly-H/V line and curve endpoints to exact H/V.
     let hv_threshold = if config.grid > 0 {
-        config.grid as f64 * 3.0
+        config.grid as f64 * 1.5
     } else {
-        6.0
+        3.0
     };
     result = result
         .iter()

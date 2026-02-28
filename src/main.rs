@@ -2,9 +2,6 @@ use clap::Parser;
 use img2bez::TracingConfig;
 use std::path::PathBuf;
 
-// Re-used for direct UFO save (previously done inside trace_into_ufo).
-use norad;
-
 #[derive(Parser)]
 #[command(name = "img2bez", about = "Bitmap image to font-ready bezier contours")]
 struct Cli {
@@ -40,14 +37,6 @@ struct Cli {
     #[arg(long, default_value = "4.0")]
     accuracy: f64,
 
-    /// RDP simplification epsilon in font units
-    #[arg(long, default_value = "8.0")]
-    rdp_epsilon: f64,
-
-    /// Corner detection threshold in degrees
-    #[arg(long, default_value = "30")]
-    corner_threshold: f64,
-
     /// Polygon smoothing iterations before curve fitting (0 = off)
     #[arg(long, default_value = "3")]
     smooth: usize,
@@ -70,6 +59,10 @@ struct Cli {
     #[arg(long)]
     invert: bool,
 
+    /// Fixed brightness threshold (0-255). Overrides Otsu auto-detection.
+    #[arg(long)]
+    threshold: Option<u8>,
+
     /// Reference .glif file for quality evaluation
     #[arg(long)]
     reference: Option<PathBuf>,
@@ -90,14 +83,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         grid: cli.grid,
         chamfer_size: cli.chamfer,
         fit_accuracy: cli.accuracy,
-        rdp_epsilon: cli.rdp_epsilon,
-        corner_angle_threshold: cli.corner_threshold.to_radians(),
         smooth_iterations: cli.smooth,
         alphamax: cli.alphamax,
         advance_width: cli.width,
         target_height: cli.target_height,
         y_offset: cli.y_offset,
         invert: cli.invert,
+        threshold: match cli.threshold {
+            Some(t) => img2bez::ThresholdMethod::Fixed(t),
+            None => img2bez::ThresholdMethod::Otsu,
+        },
         codepoints,
         ..TracingConfig::default()
     };
@@ -121,13 +116,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     eprintln!("  \u{2713} {}", cli.output.display());
 
-    // Optional reference comparison
+    // Optional reference comparison (geometric metrics)
     if let Some(ref_path) = &cli.reference {
         let traced = img2bez::eval::from_trace_result(&result);
         let reference = img2bez::eval::load_glif(ref_path)?;
         let report = img2bez::eval::evaluate(&traced, &reference, cli.grid, &ref_path.display().to_string());
         eprint!("{}", report);
     }
+
+    // Always render visual comparison: source image vs traced output
+    let comparison_path = cli.output.parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("{}_comparison.png", cli.name));
+    let font_scale = cli.target_height / {
+        let img = image::open(&cli.input)?.into_luma8();
+        img.height() as f64
+    };
+    img2bez::render::render_comparison(
+        &cli.input, &result.paths, &comparison_path,
+        font_scale, cli.y_offset, result.reposition_shift,
+    )?;
+    eprintln!("  Compare     {}", comparison_path.display());
 
     eprintln!();
 

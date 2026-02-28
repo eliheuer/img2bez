@@ -47,6 +47,17 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
 
     let v = &poly.vertices;
 
+    // DEBUG: output polygon as straight lines (no curve fitting)
+    if std::env::var("IMG2BEZ_DEBUG_POLYGON").is_ok() {
+        let mut path = BezPath::new();
+        path.move_to(Point::new(v[0].0, v[0].1));
+        for &(x, y) in &v[1..] {
+            path.line_to(Point::new(x, y));
+        }
+        path.push(PathEl::ClosePath);
+        return path;
+    }
+
     // Compute alpha for each vertex.
     let alphas: Vec<f64> = (0..m)
         .map(|j| {
@@ -63,7 +74,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
 
     if corners.is_empty() {
         // All smooth: smooth cyclically then fit entire closed curve.
-        let smoothed = smooth_closed(v, params.smooth_iterations);
+        let smoothed = laplacian_smooth(v, params.smooth_iterations, true);
         return fit_smooth_closed(&smoothed, params.accuracy);
     }
 
@@ -85,7 +96,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             path.line_to(Point::new(p.0, p.1));
         } else {
             // Smooth interior points (corners stay fixed), then fit.
-            let smoothed = smooth_segment(&segment, params.smooth_iterations);
+            let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
             let fitted = fit_segment(&smoothed, params.accuracy);
             for el in fitted.elements().iter().skip(1) {
                 path.push(*el);
@@ -143,36 +154,22 @@ fn points_to_path(points: &[(f64, f64)], closed: bool) -> BezPath {
 
 // ── Polygon smoothing ────────────────────────────────────
 
-/// Laplacian smoothing for an open polyline segment.
-/// Endpoints (corners) are kept fixed; interior points are averaged
-/// with their neighbors for `iterations` passes.
-fn smooth_segment(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
-    if iterations == 0 || points.len() <= 2 {
-        return points.to_vec();
-    }
-    let mut pts = points.to_vec();
-    let n = pts.len();
-    for _ in 0..iterations {
-        let prev = pts.clone();
-        for i in 1..n - 1 {
-            pts[i].0 = (prev[i - 1].0 + prev[i].0 + prev[i + 1].0) / 3.0;
-            pts[i].1 = (prev[i - 1].1 + prev[i].1 + prev[i + 1].1) / 3.0;
-        }
-    }
-    pts
-}
-
-/// Laplacian smoothing for a closed polyline (no corners).
-/// All points are averaged cyclically with their neighbors.
-fn smooth_closed(points: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
+/// Laplacian smoothing: each interior point is replaced by the average
+/// of itself and its two neighbors for `iterations` passes.
+///
+/// - `closed = false`: endpoints are kept fixed (open segment between corners).
+/// - `closed = true`: all points are averaged cyclically (no corners).
+fn laplacian_smooth(points: &[(f64, f64)], iterations: usize, closed: bool) -> Vec<(f64, f64)> {
     if iterations == 0 || points.len() < 3 {
         return points.to_vec();
     }
     let mut pts = points.to_vec();
     let n = pts.len();
+    let start = if closed { 0 } else { 1 };
+    let end = if closed { n } else { n - 1 };
     for _ in 0..iterations {
         let prev = pts.clone();
-        for i in 0..n {
+        for i in start..end {
             let p = if i == 0 { n - 1 } else { i - 1 };
             let nx = (i + 1) % n;
             pts[i].0 = (prev[p].0 + prev[i].0 + prev[nx].0) / 3.0;
@@ -210,14 +207,19 @@ fn extract_cyclic(
 
 /// Compute the alpha (smoothness) parameter for vertex j with neighbors i and k.
 ///
-/// Alpha is based on the cross product and perpendicular distance of j
-/// from the line i..k, normalized by the orthogonal distance.
-/// Higher alpha = more "round" (smoother curve). Lower alpha = sharper.
+/// Measures how far vertex j deviates from the line i→k, normalized by
+/// the cardinal-snapped perpendicular distance. Higher alpha = smoother
+/// (more "round"), lower alpha = sharper corner.
+///
+/// The raw alpha ranges [0, 1). Dividing by 0.75 rescales so that the
+/// default `alphamax = 1.0` corresponds to a 3/4-pixel deviation
+/// threshold — a good balance between preserving intentional corners
+/// and smoothing pixel staircase artifacts.
 fn compute_alpha(vi: (f64, f64), vj: (f64, f64), vk: (f64, f64)) -> f64 {
-    // dpara: cross product of (j-i, k-i) = twice signed area of triangle ijk
+    // Cross product of (j-i, k-i) = twice signed area of triangle ijk.
     let dpara = (vj.0 - vi.0) * (vk.1 - vi.1) - (vj.1 - vi.1) * (vk.0 - vi.0);
 
-    // ddenom: uses dorth_infty (90° rotation snapped to cardinal direction)
+    // Denominator: perpendicular distance using cardinal-snapped direction.
     let dorth = dorth_infty(vi, vk);
     let ddenom = dorth.1 * (vk.0 - vi.0) - dorth.0 * (vk.1 - vi.1);
 
@@ -226,7 +228,6 @@ fn compute_alpha(vi: (f64, f64), vj: (f64, f64), vk: (f64, f64)) -> f64 {
     }
 
     let dd = (dpara / ddenom).abs();
-
     let alpha = if dd > 1.0 { 1.0 - 1.0 / dd } else { 0.0 };
     alpha / 0.75
 }

@@ -24,23 +24,11 @@ pub struct TracingConfig {
     /// Minimum contour area in pixels (filter speckles).
     pub min_contour_area: f64,
 
-    // -- Corner detection --
-    /// Angle change threshold for corner detection (radians).
-    /// Points where the polyline turns more than this are marked as corners.
-    /// Lower = more corners. ~0.5 (30 deg) for geometric type. ~1.0 (57 deg) for organic shapes.
-    pub corner_angle_threshold: f64,
-    /// Window size for angle computation (number of neighboring points).
-    /// Larger = smoother angle estimates, fewer false corners.
-    pub corner_window: usize,
-
     // -- Curve fitting --
     /// Accuracy for kurbo fit_to_bezpath_opt (Frechet distance tolerance
     /// in font units). Smaller = more points, closer fit.
     /// 4.0 is good for type design (clean curves, few points).
     pub fit_accuracy: f64,
-    /// RDP simplification epsilon (in font units, after scaling).
-    /// Higher = fewer points, smoother input to curve fitter.
-    pub rdp_epsilon: f64,
     /// Smoothing iterations applied to polyline points before curve fitting.
     /// Removes pixel staircase noise. 0 = no smoothing.
     pub smooth_iterations: usize,
@@ -98,10 +86,7 @@ impl Default for TracingConfig {
             threshold: ThresholdMethod::Otsu,
             invert: false,
             min_contour_area: 100.0,
-            corner_angle_threshold: 0.5,
-            corner_window: 5,
             fit_accuracy: 4.0,
-            rdp_epsilon: 8.0,
             smooth_iterations: 3,
             alphamax: 1.0,
             grid: 0,

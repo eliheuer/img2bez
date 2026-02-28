@@ -5,6 +5,8 @@
 
 use kurbo::{BezPath, PathEl, Point, flatten};
 
+use crate::geom::signed_area;
+
 /// Ensure outer contours are CCW, counters are CW.
 ///
 /// Determines nesting by point-in-polygon testing: contours nested
@@ -43,30 +45,6 @@ pub fn fix_directions(paths: &[BezPath]) -> Vec<BezPath> {
             }
         })
         .collect()
-}
-
-/// Signed area via shoelace (on-curve points only).
-fn signed_area(path: &BezPath) -> f64 {
-    let mut area = 0.0;
-    let mut first = Point::ZERO;
-    let mut current = Point::ZERO;
-
-    for el in path.elements() {
-        match *el {
-            PathEl::MoveTo(p) => {
-                first = p;
-                current = p;
-            }
-            PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => {
-                area += current.x * p.y - p.x * current.y;
-                current = p;
-            }
-            PathEl::ClosePath => {
-                area += current.x * first.y - first.x * current.y;
-            }
-        }
-    }
-    area / 2.0
 }
 
 /// Reverse a BezPath's winding direction.

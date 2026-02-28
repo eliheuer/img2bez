@@ -18,7 +18,11 @@ pub fn load_and_threshold(path: &Path, config: &TracingConfig) -> Result<GrayIma
 
     let threshold = match config.threshold {
         ThresholdMethod::Fixed(t) => t,
-        ThresholdMethod::Otsu => otsu_level(&img),
+        ThresholdMethod::Otsu => {
+            let t = otsu_level(&img);
+            eprintln!("  Threshold   Otsu = {}", t);
+            t
+        }
     };
 
     let mut binary =
@@ -28,6 +32,12 @@ pub fn load_and_threshold(path: &Path, config: &TracingConfig) -> Result<GrayIma
         for pixel in binary.pixels_mut() {
             pixel.0[0] = 255 - pixel.0[0];
         }
+    }
+
+    // Debug: save thresholded bitmap
+    if std::env::var("IMG2BEZ_DEBUG_BITMAP").is_ok() {
+        binary.save("debug_threshold.png").ok();
+        eprintln!("  Debug       saved debug_threshold.png");
     }
 
     Ok(binary)

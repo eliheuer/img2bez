@@ -31,11 +31,26 @@ pub fn trace(gray: &GrayImage, config: &TracingConfig) -> Vec<BezPath> {
     let ih = image_height as i32;
     pixel_paths.retain(|p| !is_frame_contour(p, iw, ih));
 
+    // Debug: dump raw pixel contours before polygon approximation
+    if std::env::var("IMG2BEZ_DEBUG_PIXELS").is_ok() {
+        eprintln!("  Debug       {} raw pixel contours", pixel_paths.len());
+        for (i, pp) in pixel_paths.iter().enumerate() {
+            eprintln!("    contour {}: {} points, sign={}", i, pp.points.len(), pp.sign);
+        }
+    }
+
     // Stage 2-3: Optimal polygon + vertex refinement for each contour.
-    let polygons: Vec<polygon::Polygon> = pixel_paths
-        .iter()
-        .map(polygon::optimal_polygon)
-        .collect();
+    let polygons: Vec<polygon::Polygon> = if std::env::var("IMG2BEZ_DEBUG_RAW_CONTOUR").is_ok() {
+        // Debug: skip polygon — use raw pixel points as vertices
+        pixel_paths.iter().map(|pp| {
+            polygon::Polygon {
+                vertices: pp.points.iter().map(|&(x, y)| (x as f64, y as f64)).collect(),
+                sign: pp.sign,
+            }
+        }).collect()
+    } else {
+        pixel_paths.iter().map(polygon::optimal_polygon).collect()
+    };
 
     // Stage 4: Classify corners + fit minimal cubics through smooth sections.
     // Convert fit_accuracy from font units to pixel-corner coordinates.

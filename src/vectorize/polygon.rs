@@ -1,11 +1,22 @@
 //! Optimal polygon approximation via dynamic programming.
 //!
-//! 1. `calc_sums` — prefix sums for O(1) line-fit statistics
-//! 2. `calc_lon` — longest straight subpath per vertex
-//! 3. `best_polygon` — DP for globally optimal polygon
-//! 4. `adjust_vertices` — sub-pixel vertex refinement
-
-#![allow(clippy::needless_range_loop)]
+//! Given a closed pixel-edge contour, finds the polygon with the fewest
+//! vertices that stays within half a pixel of the original path. This
+//! dramatically reduces vertex count (e.g. a 200-point circle → 20 vertices)
+//! while preserving shape fidelity.
+//!
+//! ## Algorithm
+//!
+//! 1. **Prefix sums** (`calc_sums`) — O(1) line-fit statistics for any
+//!    sub-range of the path.
+//! 2. **Longest straight subpath** (`calc_lon`) — for each vertex, find
+//!    the farthest reachable vertex where the path stays within ±0.5
+//!    of a straight line (using constraint propagation).
+//! 3. **DP optimal polygon** (`best_polygon`) — globally minimize line-fit
+//!    penalty over all valid polygons with the minimum number of segments.
+//! 4. **Vertex refinement** (`adjust_vertices`) — shift each polygon vertex
+//!    to the sub-pixel position that minimizes squared distance to the
+//!    two adjacent line segments (constrained to ±0.5 of the pixel corner).
 
 use super::decompose::PixelPath;
 
@@ -21,11 +32,11 @@ struct Sums {
 
 /// Optimal polygon derived from a pixel path.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Polygon {
     /// Sub-pixel-refined vertex positions.
     pub vertices: Vec<(f64, f64)>,
     /// +1 for outer, -1 for hole (from the source PixelPath).
+    #[allow(dead_code)]
     pub sign: i8,
 }
 
@@ -43,7 +54,12 @@ pub fn optimal_polygon(path: &PixelPath) -> Polygon {
     let (sums, x0, y0) = calc_sums(&path.points);
     let lon = calc_lon(&path.points);
     let po = best_polygon(&path.points, &lon, &sums, x0, y0);
-    let vertices = adjust_vertices(&path.points, &po, &sums, x0, y0);
+    let vertices = if std::env::var("IMG2BEZ_DEBUG_NO_ADJUST").is_ok() {
+        // Debug: skip sub-pixel adjustment, use raw DP vertex positions
+        po.iter().map(|&i| (path.points[i].0 as f64, path.points[i].1 as f64)).collect()
+    } else {
+        adjust_vertices(&path.points, &po, &sums, x0, y0)
+    };
 
     Polygon {
         vertices,
@@ -79,6 +95,7 @@ fn calc_sums(pt: &[(i32, i32)]) -> (Vec<Sums>, i32, i32) {
 
 /// For each vertex i, compute the farthest vertex reachable by a straight line
 /// that stays within 0.5 units of all intermediate points.
+#[allow(clippy::needless_range_loop)]
 fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
     let n = pt.len();
     let mut lon = vec![0usize; n];
@@ -96,7 +113,6 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
     }
 
     let mut pivk = vec![0usize; n];
-    let infty = 10_000_000i64;
 
     for i in (0..n).rev() {
         // Direction counters for all 4 cardinal directions.
@@ -120,7 +136,6 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
             // If all 4 cardinal directions have appeared, path must turn.
             if ct[0] != 0 && ct[1] != 0 && ct[2] != 0 && ct[3] != 0 {
                 pivk[i] = k1 % n;
-                // goto foundk
                 break;
             }
 
@@ -128,27 +143,7 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
 
             // Check constraint violations.
             if xprod(constraint[0], cur) < 0 || xprod(constraint[1], cur) > 0 {
-                // goto constraint_viol — but handled inline below.
-                // Compute exact violation point using linear interpolation.
-                let dk = (
-                    sign(pt[k % n].0 - pt[k1 % n].0),
-                    sign(pt[k % n].1 - pt[k1 % n].1),
-                );
-                let cur1 = (pt[k1 % n].0 - pt[i].0, pt[k1 % n].1 - pt[i].1);
-                let a = xprod(constraint[0], cur1);
-                let b = xprod(constraint[0], dk);
-                let c = xprod(constraint[1], cur1);
-                let d = xprod(constraint[1], dk);
-
-                let mut j = infty;
-                if b < 0 {
-                    j = floordiv(a, -b);
-                }
-                if d > 0 {
-                    j = j.min(floordiv(-c, d));
-                }
-                pivk[i] = pmod_signed((k1 % n) as isize + j as isize, n as isize);
-                // goto foundk
+                pivk[i] = pivot_at_violation(pt, &constraint, k, k1, i, n);
                 break;
             }
 
@@ -175,30 +170,10 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
             k = nc[k1 % n];
 
             if !cyclic(k % n, i, k1 % n, n) {
-                // Went all the way around without constraint violation.
-                // Same constraint_viol logic applies here.
-                let dk = (
-                    sign(pt[k % n].0 - pt[k1 % n].0),
-                    sign(pt[k % n].1 - pt[k1 % n].1),
-                );
-                let cur1 = (pt[k1 % n].0 - pt[i].0, pt[k1 % n].1 - pt[i].1);
-                let a = xprod(constraint[0], cur1);
-                let b = xprod(constraint[0], dk);
-                let c = xprod(constraint[1], cur1);
-                let d = xprod(constraint[1], dk);
-
-                let mut j = infty;
-                if b < 0 {
-                    j = floordiv(a, -b);
-                }
-                if d > 0 {
-                    j = j.min(floordiv(-c, d));
-                }
-                pivk[i] = pmod_signed((k1 % n) as isize + j as isize, n as isize);
+                pivk[i] = pivot_at_violation(pt, &constraint, k, k1, i, n);
                 break;
             }
         }
-        // foundk:
     }
 
     // Convert pivk to lon, ensuring monotonicity.
@@ -226,11 +201,46 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
     lon
 }
 
+/// Compute the exact pivot index when a constraint is violated.
+///
+/// Uses linear interpolation between the last valid vertex (k1) and the
+/// violating vertex (k) to find the precise fractional point where the
+/// line first exits the ±0.5 corridor.
+fn pivot_at_violation(
+    pt: &[(i32, i32)],
+    constraint: &[(i32, i32); 2],
+    k: usize,
+    k1: usize,
+    i: usize,
+    n: usize,
+) -> usize {
+    let dk = (
+        sign(pt[k % n].0 - pt[k1 % n].0),
+        sign(pt[k % n].1 - pt[k1 % n].1),
+    );
+    let cur1 = (pt[k1 % n].0 - pt[i].0, pt[k1 % n].1 - pt[i].1);
+    let a = xprod(constraint[0], cur1);
+    let b = xprod(constraint[0], dk);
+    let c = xprod(constraint[1], cur1);
+    let d = xprod(constraint[1], dk);
+
+    let infty = 10_000_000i64;
+    let mut j = infty;
+    if b < 0 {
+        j = floordiv(a, -b);
+    }
+    if d > 0 {
+        j = j.min(floordiv(-c, d));
+    }
+    pmod_signed((k1 % n) as isize + j as isize, n as isize)
+}
+
 // ── Dynamic programming optimal polygon ──────────────────
 
 /// Find the globally optimal polygon using dynamic programming.
 ///
 /// Returns polygon vertex indices into the original path.
+#[allow(clippy::needless_range_loop)]
 fn best_polygon(
     pt: &[(i32, i32)],
     lon: &[usize],
@@ -241,7 +251,6 @@ fn best_polygon(
     let n = pt.len();
 
     // clip0[i] = farthest vertex reachable from i (clipping interval).
-    // C: c = mod(lon[mod(i-1,n)]-1, n); if c==i then c=mod(i+1,n); if c<i then clip0=n else clip0=c.
     let mut clip0 = vec![0usize; n];
     for i in 0..n {
         let prev_i = if i == 0 { n - 1 } else { i - 1 };
@@ -650,108 +659,26 @@ fn cyclic(a: usize, b: usize, c: usize, _n: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::decompose::PixelPath;
 
     #[test]
-    fn test_calc_lon_rectangle() {
-        // A simple 4x4 rectangle on the pixel grid (pixel-corner coordinates).
-        // Goes: right along top, down the right side, left along bottom, up the left side.
-        let mut pt: Vec<(i32, i32)> = Vec::new();
-        // Top edge: (0,4) -> (4,4)
-        for x in 0..4 { pt.push((x, 4)); }
-        // Right edge: (4,4) -> (4,0)
-        for y in (0..4).rev() { pt.push((4, y)); }
-        // Bottom edge: (4,0) -> (0,0)
-        for x in (0..4).rev() { pt.push((x, 0)); }
-        // Left edge: (0,0) -> (0,4)
-        for y in 0..4 { pt.push((0, y)); }
+    fn rectangle_produces_4_vertices() {
+        // 4x4 rectangle: top → right → bottom → left edges.
+        let mut points: Vec<(i32, i32)> = Vec::new();
+        for x in 0..4 { points.push((x, 4)); }
+        for y in (0..4).rev() { points.push((4, y)); }
+        for x in (0..4).rev() { points.push((x, 0)); }
+        for y in 0..4 { points.push((0, y)); }
 
-        let n = pt.len(); // Should be 16
-        println!("Rectangle test: n={}", n);
-        println!("Points:");
-        for (i, p) in pt.iter().enumerate() {
-            println!("  pt[{:2}] = ({}, {})", i, p.0, p.1);
-        }
+        let path = PixelPath { points, sign: 1 };
+        let poly = optimal_polygon(&path);
 
-        // ── nc (next corner) ──
-        // Recompute nc here so we can print it.
-        let mut nc = vec![0usize; n];
-        {
-            let mut k = 0usize;
-            for i in (0..n).rev() {
-                if pt[i].0 != pt[k % n].0 && pt[i].1 != pt[k % n].1 {
-                    k = i + 1;
-                }
-                nc[i] = k;
-            }
-        }
-        println!("\nnc (next corner after each vertex):");
-        for (i, &c) in nc.iter().enumerate() {
-            println!("  nc[{:2}] = {:2}  (pt[{}] = {:?})", i, c, c % n, pt[c % n]);
-        }
-
-        // ── calc_lon ──
-        let lon = calc_lon(&pt);
-        println!("\nlon (farthest reachable vertex from each vertex):");
-        for (i, &l) in lon.iter().enumerate() {
-            println!("  lon[{:2}] = {:2}  (from {:?} can reach {:?})", i, l, pt[i], pt[l % n]);
-        }
-
-        // ── Expected analysis ──
-        println!("\n--- Expected lon analysis ---");
-        println!("For a 4x4 rectangle with 16 vertices:");
-        println!("Each edge has 4 vertices. From the start of an edge,");
-        println!("a straight line should reach the end of that edge (3 steps)");
-        println!("plus possibly the next corner vertex.");
-        println!();
-        println!("Edge vertices:          corners at indices 0, 4, 8, 12");
-        println!("Top edge:    pt[0..4]   = (0,4)..(3,4)");
-        println!("Right edge:  pt[4..8]   = (4,3)..(4,0)");
-        println!("Bottom edge: pt[8..12]  = (3,0)..(0,0)");
-        println!("Left edge:   pt[12..16] = (0,1)..(0,3)");
-        println!();
-        println!("From corner pt[0]=(0,4), the straight line goes along the top edge.");
-        println!("It should reach at least pt[3]=(3,4), and potentially pt[4]=(4,3)");
-        println!("depending on the half-pixel tolerance.");
-
-        // ── calc_sums + best_polygon ──
-        let (sums, x0, y0) = calc_sums(&pt);
-        println!("\nPrefix sums: x0={}, y0={}", x0, y0);
-
-        let po = best_polygon(&pt, &lon, &sums, x0, y0);
-        println!("\nOptimal polygon: m={} vertices", po.len());
-        println!("po indices: {:?}", &po);
-        println!("po coordinates:");
-        for (j, &idx) in po.iter().enumerate() {
-            println!("  po[{}] = pt[{}] = {:?}", j, idx, pt[idx]);
-        }
-
-        // ── Verify ──
-        println!("\n--- Verification ---");
-        assert_eq!(n, 16, "Expected 16 points for a 4x4 rectangle");
-
-        // For a rectangle, we expect the optimal polygon to have exactly 4 vertices
-        // at or near the 4 corners.
+        // The DP may produce 4 or 5 vertices for a small rectangle
+        // (pixel grid constraints can introduce an extra vertex).
         assert!(
-            po.len() >= 4,
-            "Rectangle should have at least 4 polygon vertices, got {}",
-            po.len()
+            poly.vertices.len() >= 4 && poly.vertices.len() <= 5,
+            "Rectangle should produce 4-5 polygon vertices, got {}",
+            poly.vertices.len()
         );
-
-        // Ideally exactly 4 for a clean rectangle
-        if po.len() == 4 {
-            println!("PASS: Got exactly 4 polygon vertices (ideal for a rectangle)");
-        } else {
-            println!(
-                "NOTE: Got {} polygon vertices (expected 4 for a clean rectangle)",
-                po.len()
-            );
-        }
-
-        // Also run full adjust_vertices to see final positions
-        let vertices = adjust_vertices(&pt, &po, &sums, x0, y0);
-        println!("\nAdjusted vertices:");
-        for (j, v) in vertices.iter().enumerate() {
-            println!("  v[{}] = ({:.3}, {:.3})  (from pt[{}] = {:?})", j, v.0, v.1, po[j], pt[po[j]]);
-        }
     }
 }

@@ -5,6 +5,9 @@
 
 use kurbo::{BezPath, CubicBez, ParamCurve, PathEl, Point};
 
+/// Margin from t=0 and t=1 — extrema closer to endpoints than this are skipped.
+const ENDPOINT_MARGIN: f64 = 0.01;
+
 /// Insert on-curve points at H/V extrema of cubic curves.
 ///
 /// Only inserts when the extremum extends beyond the
@@ -48,8 +51,6 @@ pub fn insert_extrema(path: &BezPath, min_depth: f64) -> BezPath {
 /// Find t-values of H/V extrema on a cubic.
 fn extrema_t_values(cubic: &CubicBez, min_depth: f64) -> Vec<f64> {
     let mut t_values = Vec::new();
-    let margin = 0.01;
-
     for axis in 0..2 {
         let (v0, v1, v2, v3) = if axis == 0 {
             (cubic.p0.x, cubic.p1.x, cubic.p2.x, cubic.p3.x)
@@ -63,7 +64,7 @@ fn extrema_t_values(cubic: &CubicBez, min_depth: f64) -> Vec<f64> {
         let coeff_c = -3.0 * v0 + 3.0 * v1;
 
         for t in solve_quadratic(coeff_a, coeff_b, coeff_c) {
-            if t <= margin || t >= 1.0 - margin {
+            if t <= ENDPOINT_MARGIN || t >= 1.0 - ENDPOINT_MARGIN {
                 continue;
             }
             if extremum_depth(cubic, t, axis) >= min_depth {

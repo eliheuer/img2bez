@@ -5,6 +5,9 @@
 
 use kurbo::{BezPath, PathEl, Point, Vec2};
 
+/// Skip chamfering when edges are nearly collinear (cosine threshold).
+const COLLINEAR_THRESHOLD: f64 = 0.95;
+
 /// Add 45° chamfers at line-line corners.
 pub fn chamfer(path: &BezPath, size: f64, min_edge: f64) -> BezPath {
     let mut first = Point::ZERO;
@@ -51,7 +54,7 @@ pub fn chamfer(path: &BezPath, size: f64, min_edge: f64) -> BezPath {
 
         let dot = v_in.x * v_out.x + v_in.y * v_out.y;
         let cos = dot / (len_in * len_out);
-        if cos.abs() > 0.95 {
+        if cos.abs() > COLLINEAR_THRESHOLD {
             new_points.push(point);
             continue;
         }
