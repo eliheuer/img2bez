@@ -33,12 +33,22 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
             .collect();
     }
 
-    // One pass of H/V handle snapping catches grid-snap residuals.
-    // 15° threshold (reduced from 25°) — extrema splitting means
-    // handles are already close to H/V.
+    // Snap nearly-H/V line endpoints after grid snapping.
+    // Grid snap may leave line endpoints a few units off H/V.
+    let hv_line_tol = if config.grid > 0 {
+        config.grid as f64 * 1.5
+    } else {
+        3.0
+    };
     result = result
         .iter()
-        .map(|p| snap::hv_handles(p, 15.0))
+        .map(|p| snap::hv_lines(p, hv_line_tol))
+        .collect();
+
+    // One pass of H/V handle snapping catches grid-snap residuals.
+    result = result
+        .iter()
+        .map(|p| snap::hv_handles(p, 25.0))
         .collect();
 
     if config.chamfer_size > 0.0 {

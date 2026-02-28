@@ -153,24 +153,48 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
         })
         .collect();
 
-    // Find corner indices.
+    // Find corner indices (sharp turns).
     let corners: Vec<usize> = (0..m)
         .filter(|&j| alphas[j] >= params.alphamax)
         .collect();
 
-    // Build split points: corners + significant extrema.
-    let split_points = if corners.is_empty() {
-        // No corners: use global bounding-box extrema (≤4 points).
+    // Find curvature transitions: where the polygon changes from
+    // straight (alpha ≈ 0) to curved or vice versa. These are
+    // the natural split points at stem/crossbar boundaries.
+    let transitions = find_curvature_transitions(&alphas, 0.3);
+
+    // Build split points: corners + transitions + per-segment extrema.
+    let mut base_splits: Vec<usize> = corners.iter().copied()
+        .chain(transitions.iter().copied())
+        .collect();
+    base_splits.sort_unstable();
+    base_splits.dedup();
+    // Merge split points that are within 3 vertices of each other
+    // (keeps the first of each cluster, avoids tiny fragments).
+    base_splits = merge_nearby(base_splits, 3, m);
+
+    let split_points = if base_splits.is_empty() {
+        // No corners or transitions: use global bounding-box extrema.
         find_contour_extrema(v)
     } else {
-        // Per-segment: find the most extreme interior vertex per axis
-        // between each pair of consecutive corners.
-        let mut pts = corners.clone();
-        let nc = corners.len();
-        for ci in 0..nc {
-            let start = corners[ci];
-            let end = corners[(ci + 1) % nc];
-            pts.extend(find_segment_extrema(v, start, end, m));
+        // Per-segment: find extrema only in curved sections (not straight).
+        let mut pts = base_splits.clone();
+        let ns = base_splits.len();
+        for si in 0..ns {
+            let start = base_splits[si];
+            let end = base_splits[(si + 1) % ns];
+            let segment = extract_cyclic(v, start, end, m);
+            if segment.len() > 2 {
+                let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
+                let dev = collinear_deviation(&smoothed);
+                let s0 = smoothed[0];
+                let sn = smoothed[smoothed.len() - 1];
+                let slen = ((sn.0 - s0.0).powi(2) + (sn.1 - s0.1).powi(2)).sqrt();
+                let tol = (slen * 0.02).max(3.0);
+                if dev > tol {
+                    pts.extend(find_segment_extrema(v, start, end, m));
+                }
+            }
         }
         pts.sort_unstable();
         pts.dedup();
@@ -196,21 +220,37 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
         let segment = extract_cyclic(v, start, end, m);
 
         if segment.len() <= 2 {
-            // Straight line to next split point.
             let p = v[end];
             path.line_to(Point::new(p.0, p.1));
         } else {
-            // Smooth interior points (split-point endpoints stay fixed),
-            // then fit exactly one cubic through the section.
+            // Smooth first, then decide: line or curve.
             let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
-            let fitted = fit_single_cubic(&smoothed);
-            for el in fitted.elements().iter().skip(1) {
-                path.push(*el);
+            let max_dev = collinear_deviation(&smoothed);
+            // Relative threshold: a long segment (stem, crossbar) tolerates
+            // more absolute deviation than a short one. Minimum 3 pixels.
+            let p0 = smoothed[0];
+            let pn = smoothed[smoothed.len() - 1];
+            let seg_len = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
+            let line_tol = (seg_len * 0.02).max(3.0);
+            if max_dev <= line_tol {
+                // Straight section (stem, crossbar, etc.)
+                let p = v[end];
+                path.line_to(Point::new(p.0, p.1));
+            } else {
+                let fitted = fit_single_cubic(&smoothed);
+                for el in fitted.elements().iter().skip(1) {
+                    path.push(*el);
+                }
             }
         }
     }
 
     path.push(PathEl::ClosePath);
+
+    // Snap nearly-H/V lines to exact H/V, and merge consecutive
+    // collinear lines into single lines.
+    snap_and_merge_lines(&mut path);
+
     path
 }
 
@@ -265,9 +305,11 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
         return path;
     }
 
-    // Unit tangents.
-    let u0 = Point::new(t0.x / t0_len, t0.y / t0_len);
-    let u1 = Point::new(t1.x / t1_len, t1.y / t1_len);
+    // Unit tangents, snapped to H/V when close.
+    // Per type-design convention (ohnotype.co/blog/drawing-vectors),
+    // handles at extrema should be H/V. Snap within ~30° of an axis.
+    let u0 = snap_tangent_hv(Point::new(t0.x / t0_len, t0.y / t0_len));
+    let u1 = snap_tangent_hv(Point::new(t1.x / t1_len, t1.y / t1_len));
 
     // Optimize handle lengths to best fit the interior polyline points.
     // Try a range of scales and pick the one with least max deviation.
@@ -372,6 +414,222 @@ fn laplacian_smooth(points: &[(f64, f64)], iterations: usize, closed: bool) -> V
 }
 
 // ── Helpers ──────────────────────────────────────────────
+
+/// Find vertices at straight-to-curve transitions.
+///
+/// Smooths the alpha values over a 5-vertex window first, then finds
+/// where the smoothed alpha crosses the threshold. This filters out
+/// single-vertex noise and only fires at real structural boundaries
+/// (where stems/crossbars meet curves).
+fn find_curvature_transitions(alphas: &[f64], threshold: f64) -> Vec<usize> {
+    let m = alphas.len();
+    if m < 5 {
+        return vec![];
+    }
+
+    // Smooth alphas with a 5-vertex cyclic moving average.
+    let smoothed: Vec<f64> = (0..m)
+        .map(|j| {
+            let mut sum = 0.0;
+            for k in 0..5 {
+                sum += alphas[(j + m - 2 + k) % m];
+            }
+            sum / 5.0
+        })
+        .collect();
+
+    let mut transitions = Vec::new();
+    for j in 0..m {
+        let prev = if j == 0 { m - 1 } else { j - 1 };
+        let prev_straight = smoothed[prev] < threshold;
+        let curr_straight = smoothed[j] < threshold;
+        if prev_straight != curr_straight {
+            transitions.push(j);
+        }
+    }
+    transitions
+}
+
+/// Snap a unit tangent vector to exact H or V if it's within ~30°.
+///
+/// tan(30°) ≈ 0.577. If the minor component is less than 0.577 of the
+/// major component, the tangent is within 30° of an axis — snap it.
+/// This ensures handles point H/V at extrema and curve-to-line junctions,
+/// matching type-design convention.
+fn snap_tangent_hv(u: Point) -> Point {
+    let ax = u.x.abs();
+    let ay = u.y.abs();
+    if ax < 1e-10 && ay < 1e-10 {
+        return u;
+    }
+    // tan(30°) ≈ 0.577
+    if ax > ay && ay / ax < 0.577 {
+        // Nearly horizontal: snap to pure horizontal.
+        Point::new(u.x.signum(), 0.0)
+    } else if ay > ax && ax / ay < 0.577 {
+        // Nearly vertical: snap to pure vertical.
+        Point::new(0.0, u.y.signum())
+    } else {
+        u // Genuinely diagonal — keep as-is (corner/inflection).
+    }
+}
+
+/// Snap nearly-H/V lines to exact H/V and merge consecutive collinear lines.
+///
+/// For each LineTo, if the x-delta is much smaller than the y-delta,
+/// it's a vertical line — snap x to match. Vice versa for horizontal.
+/// Then merge consecutive lines going the same direction into one.
+fn snap_and_merge_lines(path: &mut BezPath) {
+    let els = path.elements().to_vec();
+    let mut out = BezPath::new();
+    // HV snap ratio: if one axis delta is < 25% of the other, snap it.
+    // Catches stems and crossbars that are clearly H/V in the source
+    // image but zigzag slightly in the polygon approximation.
+    let hv_ratio = 0.25;
+
+    // First pass: snap nearly-H/V lines.
+    let mut snapped: Vec<PathEl> = Vec::new();
+    let mut cursor = Point::new(0.0, 0.0);
+    for &el in &els {
+        match el {
+            PathEl::MoveTo(p) => {
+                cursor = p;
+                snapped.push(el);
+            }
+            PathEl::LineTo(p) => {
+                let dx = (p.x - cursor.x).abs();
+                let dy = (p.y - cursor.y).abs();
+                let snapped_p = if dx > 0.0 && dy > 0.0 {
+                    if dx / dy < hv_ratio {
+                        // Nearly vertical: snap x to cursor x.
+                        Point::new(cursor.x, p.y)
+                    } else if dy / dx < hv_ratio {
+                        // Nearly horizontal: snap y to cursor y.
+                        Point::new(p.x, cursor.y)
+                    } else {
+                        p
+                    }
+                } else {
+                    p
+                };
+                cursor = snapped_p;
+                snapped.push(PathEl::LineTo(snapped_p));
+            }
+            PathEl::CurveTo(c1, c2, p) => {
+                cursor = p;
+                snapped.push(PathEl::CurveTo(c1, c2, p));
+            }
+            other => snapped.push(other),
+        }
+    }
+
+    // Second pass: merge consecutive collinear lines.
+    let mut i = 0;
+    while i < snapped.len() {
+        match snapped[i] {
+            PathEl::LineTo(p1) => {
+                // Look ahead for more LineTos in the same direction.
+                let mut end = p1;
+                let prev = cursor_before(&snapped, i);
+                let is_h = (p1.y - prev.y).abs() < 1e-6;
+                let is_v = (p1.x - prev.x).abs() < 1e-6;
+                if is_h || is_v {
+                    while i + 1 < snapped.len() {
+                        if let PathEl::LineTo(p2) = snapped[i + 1] {
+                            let same_dir = if is_h {
+                                (p2.y - end.y).abs() < 1e-6
+                            } else {
+                                (p2.x - end.x).abs() < 1e-6
+                            };
+                            if same_dir {
+                                end = p2;
+                                i += 1;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                out.push(PathEl::LineTo(end));
+                cursor = end;
+            }
+            PathEl::MoveTo(p) => {
+                out.push(PathEl::MoveTo(p));
+                cursor = p;
+            }
+            PathEl::CurveTo(c1, c2, p) => {
+                out.push(PathEl::CurveTo(c1, c2, p));
+                cursor = p;
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+
+    *path = out;
+}
+
+/// Get the cursor position before element at index `i`.
+fn cursor_before(els: &[PathEl], i: usize) -> Point {
+    for j in (0..i).rev() {
+        match els[j] {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) => return p,
+            _ => {}
+        }
+    }
+    Point::new(0.0, 0.0)
+}
+
+/// Merge split-point indices that are within `min_gap` of each other.
+/// Keeps the first of each cluster. Handles cyclic wrap-around.
+fn merge_nearby(sorted: Vec<usize>, min_gap: usize, total: usize) -> Vec<usize> {
+    if sorted.len() <= 1 {
+        return sorted;
+    }
+    let mut result = vec![sorted[0]];
+    for &idx in &sorted[1..] {
+        if idx - result.last().unwrap() > min_gap {
+            result.push(idx);
+        }
+    }
+    // Check wrap-around: if last and first are too close cyclically.
+    if result.len() > 1 {
+        let last = *result.last().unwrap();
+        let first = result[0];
+        if total - last + first <= min_gap {
+            result.pop();
+        }
+    }
+    result
+}
+
+/// Maximum deviation of interior points from the line connecting
+/// first and last point. Returns 0.0 for ≤2 points.
+/// Used to detect straight sections (stems, crossbars).
+fn collinear_deviation(points: &[(f64, f64)]) -> f64 {
+    let n = points.len();
+    if n <= 2 {
+        return 0.0;
+    }
+    let (ax, ay) = points[0];
+    let (bx, by) = points[n - 1];
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-10 {
+        return points.iter()
+            .map(|&(px, py)| ((px - ax).powi(2) + (py - ay).powi(2)).sqrt())
+            .fold(0.0_f64, f64::max);
+    }
+    let mut max_d = 0.0_f64;
+    for &(px, py) in &points[1..n - 1] {
+        let cross = ((px - ax) * dy - (py - ay) * dx).abs();
+        max_d = max_d.max(cross / len);
+    }
+    max_d
+}
 
 /// Extract a cyclic sub-sequence from `start` to `end` (inclusive).
 ///
