@@ -3,19 +3,37 @@
 use kurbo::{Affine, BezPath, Shape, Vec2};
 
 /// Shift paths so bottom sits on baseline, left at LSB.
-pub fn reposition(paths: &[BezPath], lsb: f64) -> Vec<BezPath> {
+///
+/// When `grid > 0`, shifts are rounded to the grid so coordinates
+/// that were on-grid before repositioning stay on-grid after.
+pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> Vec<BezPath> {
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
+    // Use on-curve point extremes (not tight bbox) to avoid fractional shifts.
     for path in paths {
-        let bounds = path.bounding_box();
-        min_x = min_x.min(bounds.x0);
-        min_y = min_y.min(bounds.y0);
+        for el in path.elements() {
+            let pts: &[kurbo::Point] = match el {
+                kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => std::slice::from_ref(p),
+                kurbo::PathEl::CurveTo(_, _, p) => std::slice::from_ref(p),
+                kurbo::PathEl::QuadTo(_, p) => std::slice::from_ref(p),
+                kurbo::PathEl::ClosePath => &[],
+            };
+            for p in pts {
+                min_x = min_x.min(p.x);
+                min_y = min_y.min(p.y);
+            }
+        }
     }
     if min_x == f64::MAX {
         return paths.to_vec();
     }
-    let dx = lsb - min_x;
-    let dy = -min_y;
+    let mut dx = lsb - min_x;
+    let mut dy = -min_y;
+    if grid > 0 {
+        let g = grid as f64;
+        dx = (dx / g).round() * g;
+        dy = (dy / g).round() * g;
+    }
     paths.iter().map(|path| translate(path, dx, dy)).collect()
 }
 

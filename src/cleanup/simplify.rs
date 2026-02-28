@@ -3,9 +3,14 @@
 //! Converts near-straight curves to lines, merges collinear
 //! line segments, and removes segments too short to matter.
 
-use kurbo::{BezPath, PathEl, Point, Vec2};
+use kurbo::{BezPath, CubicBez, ParamCurve, PathEl, Point, Vec2};
 
-/// Convert curves where both handles hug the chord.
+/// Convert near-straight curves to line segments.
+///
+/// Samples 8 points along the cubic and converts to a line if the maximum
+/// deviation from the chord is within tolerance.  This catches cases the
+/// old handle-distance check missed (handles off-chord but curve still
+/// visually straight).
 pub fn curves_to_lines(path: &BezPath, tolerance: f64) -> BezPath {
     let mut output = BezPath::new();
     let mut current = Point::ZERO;
@@ -17,9 +22,7 @@ pub fn curves_to_lines(path: &BezPath, tolerance: f64) -> BezPath {
                 current = p;
             }
             PathEl::CurveTo(a, b, p) => {
-                let d1 = point_to_line_dist(a, current, p);
-                let d2 = point_to_line_dist(b, current, p);
-                if d1 < tolerance && d2 < tolerance {
+                if curve_is_straight(current, a, b, p, tolerance) {
                     output.line_to(p);
                 } else {
                     output.push(PathEl::CurveTo(a, b, p));
@@ -34,6 +37,20 @@ pub fn curves_to_lines(path: &BezPath, tolerance: f64) -> BezPath {
         }
     }
     output
+}
+
+/// Check if a cubic curve deviates from its chord by less than `tolerance`.
+fn curve_is_straight(p0: Point, p1: Point, p2: Point, p3: Point, tolerance: f64) -> bool {
+    let cubic = CubicBez::new(p0, p1, p2, p3);
+    let n = 8;
+    for i in 1..n {
+        let t = i as f64 / n as f64;
+        let pt = cubic.eval(t);
+        if point_to_line_dist(pt, p0, p3) > tolerance {
+            return false;
+        }
+    }
+    true
 }
 
 /// Merge consecutive collinear line segments.

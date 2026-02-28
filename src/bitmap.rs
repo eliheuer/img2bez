@@ -22,7 +22,7 @@ pub fn load_and_threshold(path: &Path, config: &TracingConfig) -> Result<GrayIma
     };
 
     let mut binary =
-        imageproc::contrast::threshold(&img, threshold, imageproc::contrast::ThresholdType::Binary);
+        imageproc::contrast::threshold(&img, threshold, imageproc::contrast::ThresholdType::BinaryInverted);
 
     if config.invert {
         for pixel in binary.pixels_mut() {

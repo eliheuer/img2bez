@@ -44,6 +44,12 @@ pub struct TracingConfig {
     /// Smoothing iterations applied to polyline points before curve fitting.
     /// Removes pixel staircase noise. 0 = no smoothing.
     pub smooth_iterations: usize,
+    /// Maximum alpha for smooth curves (corner detection threshold).
+    /// Vertices with alpha >= this become corners.
+    /// Lower = more corners = shorter smooth sections = tighter fits.
+    /// Range: 0.0 (everything is a corner) to 1.34 (nothing is a corner).
+    /// Default: 1.0. Try 0.6–0.8 for geometric type.
+    pub alphamax: f64,
 
     // -- Post-processing --
     /// Grid size for coordinate snapping. 0 = no snapping.
@@ -94,9 +100,10 @@ impl Default for TracingConfig {
             min_contour_area: 100.0,
             corner_angle_threshold: 0.5,
             corner_window: 5,
-            fit_accuracy: 8.0,
+            fit_accuracy: 4.0,
             rdp_epsilon: 8.0,
-            smooth_iterations: 0,
+            smooth_iterations: 3,
+            alphamax: 1.0,
             grid: 0,
             add_extrema: true,
             fix_direction: true,

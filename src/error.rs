@@ -23,4 +23,12 @@ pub enum TraceError {
     #[cfg(feature = "ufo")]
     #[error("norad write error: {0}")]
     NoradWrite(#[from] norad::error::FontWriteError),
+
+    #[cfg(feature = "ufo")]
+    #[error("failed to load .glif file: {0}")]
+    GlifLoad(#[from] norad::error::GlifLoadError),
+
+    #[cfg(feature = "ufo")]
+    #[error("contour conversion failed: {0}")]
+    ContourConvert(String),
 }

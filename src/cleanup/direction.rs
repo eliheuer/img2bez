@@ -3,7 +3,7 @@
 //! Ensures outer contours wind CCW and counters (holes) wind CW,
 //! which is the standard convention for TrueType/OpenType fonts.
 
-use kurbo::{BezPath, PathEl, Point};
+use kurbo::{BezPath, PathEl, Point, flatten};
 
 /// Ensure outer contours are CCW, counters are CW.
 ///
@@ -16,7 +16,7 @@ pub fn fix_directions(paths: &[BezPath]) -> Vec<BezPath> {
         return vec![];
     }
 
-    let polygons: Vec<Vec<Point>> = paths.iter().map(on_curve_points).collect();
+    let polygons: Vec<Vec<Point>> = paths.iter().map(|p| flatten_to_polygon(p, 1.0)).collect();
     let areas: Vec<f64> = paths.iter().map(signed_area).collect();
 
     paths
@@ -121,18 +121,20 @@ fn reverse_path(path: &BezPath) -> BezPath {
     output
 }
 
-/// Extract on-curve points from a BezPath as a polygon.
-fn on_curve_points(path: &BezPath) -> Vec<Point> {
-    path.elements()
-        .iter()
-        .filter_map(|el| match *el {
-            PathEl::MoveTo(p)
-            | PathEl::LineTo(p)
-            | PathEl::CurveTo(_, _, p)
-            | PathEl::QuadTo(_, p) => Some(p),
-            PathEl::ClosePath => None,
-        })
-        .collect()
+/// Flatten a BezPath to a polyline for accurate point-in-polygon testing.
+///
+/// Using only on-curve points fails when long cubics deviate far from
+/// the chord between endpoints.  Flattening within a tolerance gives a
+/// polygon that faithfully follows the actual curve.
+fn flatten_to_polygon(path: &BezPath, tolerance: f64) -> Vec<Point> {
+    let mut points = Vec::new();
+    flatten(path.elements().iter().copied(), tolerance, |el| {
+        match el {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => points.push(p),
+            _ => {}
+        }
+    });
+    points
 }
 
 /// Centroid (mean of all points) of a polygon.

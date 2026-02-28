@@ -19,6 +19,7 @@ image = "0.25"
 imageproc = "0.25"
 kurbo = "0.13"
 geo = "0.28"
+rayon = "1.10"
 thiserror = "2"
 
 # Optional: output backends

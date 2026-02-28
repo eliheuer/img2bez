@@ -38,45 +38,65 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
             .collect();
     }
 
-    // Snap handles within 15° of H/V to exact H/V.
+    // Snap handles within 25° of H/V to exact H/V.
     result = result
         .iter()
-        .map(|p| snap::hv_handles(p, 15.0))
+        .map(|p| snap::hv_handles(p, 25.0))
         .collect();
 
-    // Snap nearly-horizontal/vertical line and curve endpoints to exact H/V.
-    let hv_threshold = if config.grid > 0 {
-        config.grid as f64 * 2.0
+    // Force remaining off-axis handles to H/V if curve distortion
+    // stays within the grid tolerance.
+    let hv_force_tol = if config.grid > 0 {
+        config.grid as f64 * 16.0
     } else {
-        4.0
+        32.0
+    };
+    result = result
+        .iter()
+        .map(|p| snap::force_hv_handles(p, hv_force_tol))
+        .collect();
+
+    // Convert degenerate curves (both handles hug the chord) to lines.
+    // Must run before hv_lines so newly-created lines get H/V snapped.
+    let c2l_tolerance = if config.grid > 0 {
+        config.grid as f64 * 3.0
+    } else {
+        5.0
+    };
+    result = result
+        .iter()
+        .map(|p| simplify::curves_to_lines(p, c2l_tolerance))
+        .collect();
+
+    // Snap nearly-H/V line and curve endpoints to exact H/V.
+    let hv_threshold = if config.grid > 0 {
+        config.grid as f64 * 3.0
+    } else {
+        6.0
     };
     result = result
         .iter()
         .map(|p| snap::hv_lines(p, hv_threshold))
         .collect();
 
-    // Convert near-straight curves to lines.
-    let line_tolerance = if config.grid > 0 {
-        (config.grid as f64 * 3.0).max(6.0)
-    } else {
-        6.0
-    };
+    // Re-snap handles: hv_lines may have moved endpoints, invalidating
+    // handle alignments set earlier.
     result = result
         .iter()
-        .map(|p| simplify::curves_to_lines(p, line_tolerance))
+        .map(|p| snap::hv_handles(p, 25.0))
         .collect();
 
     // Merge collinear lines, remove tiny segments.
-    let tight = if config.grid > 0 {
-        config.grid as f64
+    let merge_tol = if config.grid > 0 {
+        config.grid as f64 * 2.0
     } else {
         4.0
     };
     result = result
         .iter()
         .map(|p| {
-            let p = simplify::merge_collinear(p, tight);
-            simplify::remove_tiny(&p, tight)
+            let p = simplify::merge_collinear(p, merge_tol);
+            simplify::remove_tiny(&p, merge_tol)
         })
         .collect();
 
