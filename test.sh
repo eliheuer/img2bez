@@ -14,5 +14,4 @@ cargo run --release -- \
   --target-height 1088 \
   --y-offset=-256 \
   --grid 2 \
-  --accuracy 2.0 \
-  --corner-threshold 30
+  --accuracy 2.0

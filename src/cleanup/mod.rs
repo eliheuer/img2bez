@@ -1,8 +1,9 @@
 //! Post-processing pipeline for traced bezier contours.
 //!
-//! Transforms raw fitted curves into font-ready outlines:
-//! contour direction, extrema insertion, grid snapping,
-//! H/V handle correction, and optional chamfers.
+//! With extrema-based splitting in the curve fitting stage, most
+//! cleanup is no longer needed. This pipeline handles only:
+//! contour direction, grid snapping, residual H/V handle correction,
+//! and optional chamfers.
 
 mod chamfer;
 mod direction;
@@ -14,20 +15,14 @@ use kurbo::BezPath;
 
 use crate::config::TracingConfig;
 
-/// Apply all post-processing steps to traced contours.
+/// Apply post-processing steps to traced contours.
+///
+/// Four steps: fix direction → grid snap → H/V handles → chamfer.
 pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
     let mut result = paths.to_vec();
 
     if config.fix_direction {
         result = direction::fix_directions(&result);
-    }
-
-    if config.add_extrema {
-        let depth = config.min_extrema_depth;
-        result = result
-            .iter()
-            .map(|p| extrema::insert_extrema(p, depth))
-            .collect();
     }
 
     if config.grid > 0 {
@@ -38,66 +33,12 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
             .collect();
     }
 
-    // Snap handles within 25° of H/V to exact H/V.
+    // One pass of H/V handle snapping catches grid-snap residuals.
+    // 15° threshold (reduced from 25°) — extrema splitting means
+    // handles are already close to H/V.
     result = result
         .iter()
-        .map(|p| snap::hv_handles(p, 25.0))
-        .collect();
-
-    // Force remaining off-axis handles to H/V if curve distortion
-    // stays within the grid tolerance.
-    let hv_force_tol = if config.grid > 0 {
-        config.grid as f64 * 4.0
-    } else {
-        8.0
-    };
-    result = result
-        .iter()
-        .map(|p| snap::force_hv_handles(p, hv_force_tol))
-        .collect();
-
-    // Convert degenerate curves (both handles hug the chord) to lines.
-    // Must run before hv_lines so newly-created lines get H/V snapped.
-    let c2l_tolerance = if config.grid > 0 {
-        config.grid as f64 * 3.0
-    } else {
-        5.0
-    };
-    result = result
-        .iter()
-        .map(|p| simplify::curves_to_lines(p, c2l_tolerance))
-        .collect();
-
-    // Snap nearly-H/V line and curve endpoints to exact H/V.
-    let hv_threshold = if config.grid > 0 {
-        config.grid as f64 * 1.5
-    } else {
-        3.0
-    };
-    result = result
-        .iter()
-        .map(|p| snap::hv_lines(p, hv_threshold))
-        .collect();
-
-    // Re-snap handles: hv_lines may have moved endpoints, invalidating
-    // handle alignments set earlier.
-    result = result
-        .iter()
-        .map(|p| snap::hv_handles(p, 25.0))
-        .collect();
-
-    // Merge collinear lines, remove tiny segments.
-    let merge_tol = if config.grid > 0 {
-        config.grid as f64 * 2.0
-    } else {
-        4.0
-    };
-    result = result
-        .iter()
-        .map(|p| {
-            let p = simplify::merge_collinear(p, merge_tol);
-            simplify::remove_tiny(&p, merge_tol)
-        })
+        .map(|p| snap::hv_handles(p, 15.0))
         .collect();
 
     if config.chamfer_size > 0.0 {

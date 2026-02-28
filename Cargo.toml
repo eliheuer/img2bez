@@ -18,9 +18,11 @@ required-features = ["cli"]
 image = "0.25"
 imageproc = "0.25"
 kurbo = "0.13"
-geo = "0.28"
+
 rayon = "1.10"
 thiserror = "2"
+tiny-skia = "0.11"
+png = "0.17"
 
 # Optional: output backends
 norad = { version = "0.18", features = ["kurbo"], optional = true }

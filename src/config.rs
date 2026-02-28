@@ -42,13 +42,8 @@ pub struct TracingConfig {
     // -- Post-processing --
     /// Grid size for coordinate snapping. 0 = no snapping.
     pub grid: i32,
-    /// Whether to insert points at curve extrema.
-    pub add_extrema: bool,
     /// Whether to correct contour direction (CCW outer, CW counter).
     pub fix_direction: bool,
-    /// Minimum depth for extrema insertion. Extrema shallower than this
-    /// (in font units) are skipped. Glyphs.app recommends ~20.
-    pub min_extrema_depth: f64,
     /// Chamfer size. 0 = no chamfers. 16 = Virtua Grotesk Regular.
     pub chamfer_size: f64,
     /// Minimum edge length to chamfer (edges shorter than this are skipped).
@@ -90,9 +85,7 @@ impl Default for TracingConfig {
             smooth_iterations: 3,
             alphamax: 1.0,
             grid: 0,
-            add_extrema: true,
             fix_direction: true,
-            min_extrema_depth: 20.0,
             chamfer_size: 0.0,
             chamfer_min_edge: 40.0,
             advance_width: None,

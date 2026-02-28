@@ -116,10 +116,8 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
         .collect();
     let mut steps: Vec<&str> = Vec::new();
     if config.fix_direction { steps.push("direction"); }
-    if config.add_extrema { steps.push("extrema"); }
     if config.grid > 0 { steps.push("grid snap"); }
     steps.push("H/V snap");
-    steps.push("simplify");
     if config.chamfer_size > 0.0 { steps.push("chamfer"); }
     eprintln!("  Clean       {}", steps.join(" \u{00b7} "));
 
