@@ -122,7 +122,15 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
     eprintln!("  Clean       {}", steps.join(" \u{00b7} "));
 
     // ── Metrics ───────────────────────────────────────────
+    // Debug: show bounding box before reposition
+    {
+        use kurbo::Shape;
+        if let Some(bb) = paths.iter().map(|p| p.bounding_box()).reduce(|a: kurbo::Rect, b| a.union(b)) {
+            eprintln!("  Pre-repos   bbox x=[{:.1}, {:.1}] y=[{:.1}, {:.1}]", bb.x0, bb.x1, bb.y0, bb.y1);
+        }
+    }
     let (paths, reposition_shift) = metrics::reposition(&paths, config.lsb, config.grid);
+    eprintln!("  Reposition  shift=({:.1}, {:.1})  lsb={:.1}", reposition_shift.0, reposition_shift.1, config.lsb);
     let advance_width = config
         .advance_width
         .unwrap_or_else(|| metrics::advance_from_bounds(&paths, config.rsb));

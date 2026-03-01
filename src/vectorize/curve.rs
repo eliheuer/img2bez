@@ -172,31 +172,20 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // the natural split points at stem/crossbar boundaries.
     let transitions = find_curvature_transitions(&alphas, 0.3);
 
-    // Build split points: corners + transitions.
-    // Corners are always kept (structurally important, even when close together).
-    // Transitions that fall within 3 vertices of a corner are dropped
-    // (they're redundant with the corner), but transitions far from
-    // corners are kept for stem/crossbar boundaries.
+    // Build split points: corners + ALL transitions.
+    // Corners and transitions serve different structural purposes:
+    // corners mark sharp angular changes, transitions mark where
+    // straight sections meet curved sections. Both are needed even
+    // when they're near each other (e.g., a chamfered corner adjacent
+    // to a stem/curve boundary).
     let corner_set: std::collections::HashSet<usize> = corners.iter().copied().collect();
-    let filtered_transitions: Vec<usize> = transitions
-        .iter()
-        .copied()
-        .filter(|&t| {
-            // Keep this transition only if it's > 3 vertices from any corner.
-            !corners.iter().any(|&c| {
-                let d = if t > c { t - c } else { c - t };
-                let d = d.min(m - d); // cyclic distance
-                d <= 3
-            })
-        })
-        .collect();
     let mut base_splits: Vec<usize> = corners.iter().copied()
-        .chain(filtered_transitions.iter().copied())
+        .chain(transitions.iter().copied())
         .collect();
     base_splits.sort_unstable();
     base_splits.dedup();
-    // Merge only non-corner transitions that cluster together.
-    base_splits = merge_nearby_preserve_corners(base_splits, 3, m, &corner_set);
+    // Merge only non-corner transitions that are at the same vertex.
+    base_splits = merge_nearby_preserve_corners(base_splits, 1, m, &corner_set);
 
     let split_points = if base_splits.is_empty() {
         // No corners or transitions: use global bounding-box extrema.
@@ -284,11 +273,18 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             let pn = smoothed[smoothed.len() - 1];
             let seg_len = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
             let line_tol = (seg_len * 0.02).max(3.0);
+            if std::env::var("IMG2BEZ_DEBUG_SPLITS").is_ok() {
+                eprintln!("  Section[{}] ({:.1},{:.1})->({:.1},{:.1}) len={:.1} pts={} dev={:.2} tol={:.2} => {}",
+                    si, p0.0, p0.1, pn.0, pn.1, seg_len, segment.len(), max_dev, line_tol,
+                    if max_dev <= line_tol { "LINE" } else { "CURVE" });
+            }
             if max_dev <= line_tol {
                 // Straight section (stem, crossbar, etc.)
                 let p = v[end];
                 path.line_to(Point::new(p.0, p.1));
             } else {
+                // One cubic per section — keeps points at extrema
+                // with H/V handles per type design convention.
                 let fitted = fit_single_cubic(&smoothed);
                 for el in fitted.elements().iter().skip(1) {
                     path.push(*el);

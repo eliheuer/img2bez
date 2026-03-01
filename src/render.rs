@@ -82,7 +82,6 @@ pub fn render_comparison(
     let panel_w: u32 = 800;
     let padding: u32 = 20;
     let separator: u32 = 2;
-    let total_w = panel_w * 2 + separator;
 
     let content_w = (panel_w - padding * 2) as f32;
     let content_h = (panel_h - padding * 2) as f32;
@@ -154,13 +153,24 @@ pub fn render_comparison(
     // where s = img_scale / font_scale
     let (dx, dy) = reposition_shift;
     let s = img_scale as f64 / font_scale;
+    eprintln!("  Render      src={}x{} img_scale={:.4} font_scale={:.4} s={:.6}", src_w, src_h, img_scale, font_scale, s);
+    eprintln!("  Render      rendered={}x{} ox={} oy={} padding={}", rendered_w, rendered_h, ox, oy, padding);
+    eprintln!("  Render      dx={:.1} dy={:.1} y_offset={:.1}", dx, dy, y_offset);
+    let tx = (ox as f64 - s * dx) as f32;
+    let ty = (oy as f64 + rendered_h as f64 + s * (dy + y_offset)) as f32;
+    eprintln!("  Render      tx={:.2} ty={:.2}", tx, ty);
+    // Verify: map font point (dx, -dy + y_offset) back — should give (ox, oy+rendered_h) i.e. bottom-left
+    // Actually map the pre-reposition origin (0,0) in pixel-corner coords:
+    //   font coords = (0*scale + dx, 0*scale + y_offset + dy)
+    //   display = (s*(dx - dx) + ox, -s*(y_offset+dy - dy - y_offset) + oy + rendered_h)
+    //           = (ox, oy + rendered_h) ✓
     let transform = tiny_skia::Transform {
         sx: s as f32,
         kx: 0.0,
         ky: 0.0,
         sy: -(s as f32), // flip Y
-        tx: (ox as f64 - s * dx) as f32,
-        ty: (oy as f64 + rendered_h as f64 + s * (dy + y_offset)) as f32,
+        tx,
+        ty,
     };
 
     let mut traced_panel = tiny_skia::Pixmap::new(panel_w, panel_h).unwrap();
@@ -187,7 +197,23 @@ pub fn render_comparison(
         );
     }
 
+    // ── Third panel: overlay (traced in red on source) ──
+    let mut overlay_panel = source_panel.clone();
+    let mut red_paint = tiny_skia::Paint::default();
+    red_paint.set_color(tiny_skia::Color::from_rgba8(255, 0, 0, 128));
+    red_paint.anti_alias = true;
+    if let Some(sk_path) = kurbo_to_tinyskia(&combined, transform) {
+        overlay_panel.fill_path(
+            &sk_path,
+            &red_paint,
+            tiny_skia::FillRule::EvenOdd,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
+
     // ── Composite ──
+    let total_w = panel_w * 3 + separator * 2;
     let mut final_pixmap = tiny_skia::Pixmap::new(total_w, panel_h).unwrap();
     final_pixmap.fill(tiny_skia::Color::from_rgba8(200, 200, 200, 255));
     for y in 0..panel_h {
@@ -196,10 +222,82 @@ pub fn render_comparison(
             final_pixmap.pixels_mut()[(y * total_w + x) as usize] = source_panel.pixels()[idx];
             final_pixmap.pixels_mut()[(y * total_w + panel_w + separator + x) as usize] =
                 traced_panel.pixels()[idx];
+            final_pixmap.pixels_mut()[(y * total_w + (panel_w + separator) * 2 + x) as usize] =
+                overlay_panel.pixels()[idx];
         }
     }
 
     let png_data = encode_png(&final_pixmap);
     std::fs::write(output_path, png_data)?;
+
+    // ── 1:1 pixel diff (debug) ──
+    // Render contour at source resolution, compare with binary pixel-by-pixel.
+    if std::env::var("IMG2BEZ_DEBUG_PIXELDIFF").is_ok() {
+        let (dx, dy) = reposition_shift;
+        let s1 = 1.0 / font_scale; // maps font units to source pixels
+        let t1x1 = tiny_skia::Transform {
+            sx: s1 as f32,
+            kx: 0.0,
+            ky: 0.0,
+            sy: -(s1 as f32),
+            tx: (-(s1 * dx)) as f32,
+            ty: (src_h as f64 + s1 * (dy + y_offset)) as f32,
+        };
+        let mut contour_pm = tiny_skia::Pixmap::new(src_w, src_h).unwrap();
+        contour_pm.fill(tiny_skia::Color::WHITE);
+        let mut black = tiny_skia::Paint::default();
+        black.set_color(tiny_skia::Color::BLACK);
+        black.anti_alias = false;
+        if let Some(sk_path) = kurbo_to_tinyskia(&combined, t1x1) {
+            contour_pm.fill_path(
+                &sk_path, &black, tiny_skia::FillRule::EvenOdd,
+                tiny_skia::Transform::identity(), None,
+            );
+        }
+        // Compare: count pixels that differ
+        let mut source_only = 0u64; // black in source, white in contour
+        let mut contour_only = 0u64; // white in source, black in contour
+        let mut both = 0u64; // both black
+        for y in 0..src_h {
+            for x in 0..src_w {
+                let src_px = binary.get_pixel(x, y).0[0]; // 0=glyph, 255=bg
+                let cnt_px = contour_pm.pixels()[(y * src_w + x) as usize];
+                let cnt_is_black = cnt_px.red() < 128;
+                let src_is_black = src_px < 128;
+                match (src_is_black, cnt_is_black) {
+                    (true, true) => both += 1,
+                    (true, false) => source_only += 1,
+                    (false, true) => contour_only += 1,
+                    (false, false) => {}
+                }
+            }
+        }
+        eprintln!("  PixelDiff   overlap={} source_only={} contour_only={} total_src={} total_cnt={}",
+            both, source_only, contour_only, both + source_only, both + contour_only);
+        // Save the diff image: green=overlap, red=contour-only, blue=source-only
+        let mut diff_pm = tiny_skia::Pixmap::new(src_w, src_h).unwrap();
+        diff_pm.fill(tiny_skia::Color::WHITE);
+        for y in 0..src_h {
+            for x in 0..src_w {
+                let src_px = binary.get_pixel(x, y).0[0];
+                let cnt_px = contour_pm.pixels()[(y * src_w + x) as usize];
+                let cnt_is_black = cnt_px.red() < 128;
+                let src_is_black = src_px < 128;
+                let color = match (src_is_black, cnt_is_black) {
+                    (true, true) => tiny_skia::PremultipliedColorU8::from_rgba(0, 128, 0, 255).unwrap(),
+                    (true, false) => tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 255, 255).unwrap(),
+                    (false, true) => tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap(),
+                    (false, false) => continue,
+                };
+                diff_pm.pixels_mut()[(y * src_w + x) as usize] = color;
+            }
+        }
+        let diff_path = output_path.with_file_name(
+            format!("{}_pixeldiff.png", output_path.file_stem().unwrap().to_str().unwrap())
+        );
+        std::fs::write(&diff_path, encode_png(&diff_pm))?;
+        eprintln!("  PixelDiff   saved {}", diff_path.display());
+    }
+
     Ok(())
 }
