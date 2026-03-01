@@ -33,9 +33,11 @@ impl Default for CurveParams {
     }
 }
 
-/// Minimum protrusion (in polygon-coordinate units) for a vertex to
-/// count as a segment extremum. Filters out sub-pixel noise.
-const MIN_PROTRUSION: f64 = 2.0;
+/// Minimum absolute protrusion (in polygon-coordinate units) for a
+/// vertex to count as a segment extremum. Filters out sub-pixel noise.
+/// Also uses a relative threshold (5% of segment diagonal) for small features.
+const MIN_PROTRUSION_ABS: f64 = 2.0;
+const MIN_PROTRUSION_REL: f64 = 0.05;
 
 /// Find the bounding-box extrema of an entire contour (no-corners case).
 ///
@@ -80,6 +82,13 @@ fn find_segment_extrema(
     let baseline_min_y = sy.min(ey);
     let baseline_max_y = sy.max(ey);
 
+    // Dynamic protrusion threshold: use the smaller of the absolute
+    // minimum and a percentage of the segment diagonal. This lets
+    // small features (like the tail of an 'a') register extrema
+    // that would be filtered out by a fixed absolute threshold.
+    let diag = ((ex - sx).powi(2) + (ey - sy).powi(2)).sqrt();
+    let min_protrusion = MIN_PROTRUSION_ABS.min(diag * MIN_PROTRUSION_REL).max(0.5);
+
     let mut min_x = baseline_min_x;
     let mut max_x = baseline_max_x;
     let mut min_y = baseline_min_y;
@@ -101,16 +110,16 @@ fn find_segment_extrema(
 
     let mut extrema = Vec::new();
     if let Some(i) = min_x_idx {
-        if baseline_min_x - min_x >= MIN_PROTRUSION { extrema.push(i); }
+        if baseline_min_x - min_x >= min_protrusion { extrema.push(i); }
     }
     if let Some(i) = max_x_idx {
-        if max_x - baseline_max_x >= MIN_PROTRUSION { extrema.push(i); }
+        if max_x - baseline_max_x >= min_protrusion { extrema.push(i); }
     }
     if let Some(i) = min_y_idx {
-        if baseline_min_y - min_y >= MIN_PROTRUSION { extrema.push(i); }
+        if baseline_min_y - min_y >= min_protrusion { extrema.push(i); }
     }
     if let Some(i) = max_y_idx {
-        if max_y - baseline_max_y >= MIN_PROTRUSION { extrema.push(i); }
+        if max_y - baseline_max_y >= min_protrusion { extrema.push(i); }
     }
 
     extrema.sort_unstable();
@@ -163,15 +172,31 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // the natural split points at stem/crossbar boundaries.
     let transitions = find_curvature_transitions(&alphas, 0.3);
 
-    // Build split points: corners + transitions + per-segment extrema.
+    // Build split points: corners + transitions.
+    // Corners are always kept (structurally important, even when close together).
+    // Transitions that fall within 3 vertices of a corner are dropped
+    // (they're redundant with the corner), but transitions far from
+    // corners are kept for stem/crossbar boundaries.
+    let corner_set: std::collections::HashSet<usize> = corners.iter().copied().collect();
+    let filtered_transitions: Vec<usize> = transitions
+        .iter()
+        .copied()
+        .filter(|&t| {
+            // Keep this transition only if it's > 3 vertices from any corner.
+            !corners.iter().any(|&c| {
+                let d = if t > c { t - c } else { c - t };
+                let d = d.min(m - d); // cyclic distance
+                d <= 3
+            })
+        })
+        .collect();
     let mut base_splits: Vec<usize> = corners.iter().copied()
-        .chain(transitions.iter().copied())
+        .chain(filtered_transitions.iter().copied())
         .collect();
     base_splits.sort_unstable();
     base_splits.dedup();
-    // Merge split points that are within 3 vertices of each other
-    // (keeps the first of each cluster, avoids tiny fragments).
-    base_splits = merge_nearby(base_splits, 3, m);
+    // Merge only non-corner transitions that cluster together.
+    base_splits = merge_nearby_preserve_corners(base_splits, 3, m, &corner_set);
 
     let split_points = if base_splits.is_empty() {
         // No corners or transitions: use global bounding-box extrema.
@@ -200,6 +225,33 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
         pts.dedup();
         pts
     };
+
+    // DEBUG: print split analysis when IMG2BEZ_DEBUG_SPLITS is set
+    if std::env::var("IMG2BEZ_DEBUG_SPLITS").is_ok() {
+        eprintln!("=== polygon_to_bezpath debug (contour with {} vertices) ===", m);
+        eprintln!("  Total polygon vertices: {}", m);
+        eprintln!("  Corners ({}):", corners.len());
+        for &ci in &corners {
+            eprintln!("    corner[{}] = ({:.1}, {:.1})  alpha={:.3}", ci, v[ci].0, v[ci].1, alphas[ci]);
+        }
+        eprintln!("  Transitions ({}):", transitions.len());
+        for &ti in &transitions {
+            eprintln!("    transition[{}] = ({:.1}, {:.1})  alpha={:.3}", ti, v[ti].0, v[ti].1, alphas[ti]);
+        }
+        eprintln!("  Final split_points ({}):", split_points.len());
+        for &si in &split_points {
+            let label = if corners.contains(&si) {
+                "corner"
+            } else if transitions.contains(&si) {
+                "transition"
+            } else {
+                "extremum"
+            };
+            eprintln!("    split[{}] = ({:.1}, {:.1})  [{}]", si, v[si].0, v[si].1, label);
+        }
+        eprintln!("===");
+    }
+
 
     if split_points.is_empty() {
         // No corners or extrema: smooth cyclically then fit entire closed curve.
@@ -298,7 +350,6 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
     let t1_len = (t1.x * t1.x + t1.y * t1.y).sqrt();
 
     if t0_len < 1e-10 || t1_len < 1e-10 {
-        // Degenerate tangent: fall back to straight line.
         let mut path = BezPath::new();
         path.move_to(p0);
         path.line_to(p3);
@@ -314,9 +365,8 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
     // Optimize handle lengths to best fit the interior polyline points.
     // Try a range of scales and pick the one with least max deviation.
     let chord = ((p3.x - p0.x).powi(2) + (p3.y - p0.y).powi(2)).sqrt();
-    let base = chord / 3.0;
-    let mut best_a = base;
-    let mut best_b = base;
+    let mut best_a = chord / 3.0;
+    let mut best_b = chord / 3.0;
     let mut best_err = f64::MAX;
 
     for &scale in &[0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5] {
@@ -582,23 +632,34 @@ fn cursor_before(els: &[PathEl], i: usize) -> Point {
     Point::new(0.0, 0.0)
 }
 
-/// Merge split-point indices that are within `min_gap` of each other.
-/// Keeps the first of each cluster. Handles cyclic wrap-around.
-fn merge_nearby(sorted: Vec<usize>, min_gap: usize, total: usize) -> Vec<usize> {
+/// Merge non-corner split-point indices that are within `min_gap` of each other.
+/// Corners are always kept (they represent real structural features).
+/// Non-corner transitions too close to a kept point are dropped.
+fn merge_nearby_preserve_corners(
+    sorted: Vec<usize>,
+    min_gap: usize,
+    total: usize,
+    corners: &std::collections::HashSet<usize>,
+) -> Vec<usize> {
     if sorted.len() <= 1 {
         return sorted;
     }
     let mut result = vec![sorted[0]];
     for &idx in &sorted[1..] {
-        if idx - result.last().unwrap() > min_gap {
+        let gap = idx - result.last().unwrap();
+        if corners.contains(&idx) {
+            // Always keep corners, even if close to previous point.
+            result.push(idx);
+        } else if gap > min_gap {
             result.push(idx);
         }
+        // else: non-corner too close to previous — drop it.
     }
-    // Check wrap-around: if last and first are too close cyclically.
+    // Check wrap-around: only drop last if it's NOT a corner.
     if result.len() > 1 {
         let last = *result.last().unwrap();
         let first = result[0];
-        if total - last + first <= min_gap {
+        if total - last + first <= min_gap && !corners.contains(&last) {
             result.pop();
         }
     }
