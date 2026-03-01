@@ -331,15 +331,19 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
         return path;
     }
 
-    // Tangent at start: direction from first to second point.
+    // Tangent at start/end: use a wider window (up to 1/3 of the section)
+    // for more stable direction estimation. Looking at just the nearest
+    // neighbor gives noisy tangents; averaging over a few points better
+    // reflects the curve's overall direction, making H/V snapping more
+    // effective per type-design convention.
+    let k = ((n / 3).max(1)).min(5);
     let t0 = Point::new(
-        points[1].0 - points[0].0,
-        points[1].1 - points[0].1,
+        points[k].0 - points[0].0,
+        points[k].1 - points[0].1,
     );
-    // Tangent at end: direction from second-to-last to last point.
     let t1 = Point::new(
-        points[n - 1].0 - points[n - 2].0,
-        points[n - 1].1 - points[n - 2].1,
+        points[n - 1].0 - points[n - 1 - k].0,
+        points[n - 1].1 - points[n - 1 - k].1,
     );
 
     let t0_len = (t0.x * t0.x + t0.y * t0.y).sqrt();
@@ -354,27 +358,31 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
 
     // Unit tangents, snapped to H/V when close.
     // Per type-design convention (ohnotype.co/blog/drawing-vectors),
-    // handles at extrema should be H/V. Snap within ~30° of an axis.
+    // handles at extrema should be H/V.
     let u0 = snap_tangent_hv(Point::new(t0.x / t0_len, t0.y / t0_len));
     let u1 = snap_tangent_hv(Point::new(t1.x / t1_len, t1.y / t1_len));
 
     // Optimize handle lengths to best fit the interior polyline points.
-    // Try a range of scales and pick the one with least max deviation.
+    // Test asymmetric (a, b) combinations — curve sections are often
+    // asymmetric (e.g., a quarter-circle starting from a tangent line).
     let chord = ((p3.x - p0.x).powi(2) + (p3.y - p0.y).powi(2)).sqrt();
     let mut best_a = chord / 3.0;
     let mut best_b = chord / 3.0;
     let mut best_err = f64::MAX;
 
-    for &scale in &[0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5] {
-        let a = chord * scale;
-        let b = chord * scale;
-        let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
-        let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
-        let err = max_polyline_deviation(p0, p1, p2, p3, points);
-        if err < best_err {
-            best_err = err;
-            best_a = a;
-            best_b = b;
+    let scales: &[f64] = &[0.20, 0.27, 0.33, 0.40, 0.50];
+    for &sa in scales {
+        for &sb in scales {
+            let a = chord * sa;
+            let b = chord * sb;
+            let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
+            let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
+            let err = max_polyline_deviation(p0, p1, p2, p3, points);
+            if err < best_err {
+                best_err = err;
+                best_a = a;
+                best_b = b;
+            }
         }
     }
 
@@ -496,23 +504,25 @@ fn find_curvature_transitions(alphas: &[f64], threshold: f64) -> Vec<usize> {
     transitions
 }
 
-/// Snap a unit tangent vector to exact H or V if it's within ~30°.
+/// Snap a unit tangent vector to exact H or V if it's within ~40°.
 ///
-/// tan(30°) ≈ 0.577. If the minor component is less than 0.577 of the
-/// major component, the tangent is within 30° of an axis — snap it.
+/// tan(40°) ≈ 0.839. If the minor component is less than 0.839 of the
+/// major component, the tangent is within 40° of an axis — snap it.
 /// This ensures handles point H/V at extrema and curve-to-line junctions,
-/// matching type-design convention.
+/// matching type-design convention (ohnotype.co/blog/drawing-vectors).
+/// 40° is aggressive but appropriate: in type design, nearly all handles
+/// should be H/V; genuinely diagonal handles are rare (mainly inflections).
 fn snap_tangent_hv(u: Point) -> Point {
     let ax = u.x.abs();
     let ay = u.y.abs();
     if ax < 1e-10 && ay < 1e-10 {
         return u;
     }
-    // tan(30°) ≈ 0.577
-    if ax > ay && ay / ax < 0.577 {
+    // tan(40°) ≈ 0.839
+    if ax > ay && ay / ax < 0.839 {
         // Nearly horizontal: snap to pure horizontal.
         Point::new(u.x.signum(), 0.0)
-    } else if ay > ax && ax / ay < 0.577 {
+    } else if ay > ax && ax / ay < 0.839 {
         // Nearly vertical: snap to pure vertical.
         Point::new(0.0, u.y.signum())
     } else {
@@ -570,32 +580,29 @@ fn snap_and_merge_lines(path: &mut BezPath) {
     }
 
     // Second pass: merge consecutive collinear lines.
+    // Merges both H/V lines and nearly-collinear diagonal lines.
+    let collinear_tol = 1.5; // max perpendicular deviation to merge
     let mut i = 0;
     while i < snapped.len() {
         match snapped[i] {
             PathEl::LineTo(p1) => {
-                // Look ahead for more LineTos in the same direction.
+                let start = cursor_before(&snapped, i);
                 let mut end = p1;
-                let prev = cursor_before(&snapped, i);
-                let is_h = (p1.y - prev.y).abs() < 1e-6;
-                let is_v = (p1.x - prev.x).abs() < 1e-6;
-                if is_h || is_v {
-                    while i + 1 < snapped.len() {
-                        if let PathEl::LineTo(p2) = snapped[i + 1] {
-                            let same_dir = if is_h {
-                                (p2.y - end.y).abs() < 1e-6
-                            } else {
-                                (p2.x - end.x).abs() < 1e-6
-                            };
-                            if same_dir {
-                                end = p2;
-                                i += 1;
-                            } else {
-                                break;
-                            }
+                // Greedily extend: try to merge the next LineTo if
+                // all intermediate points stay collinear with start→end.
+                while i + 1 < snapped.len() {
+                    if let PathEl::LineTo(p2) = snapped[i + 1] {
+                        // Check if 'end' (current middle point) stays
+                        // close to the line from 'start' to 'p2'.
+                        let dev = point_line_dist(end, start, p2);
+                        if dev < collinear_tol {
+                            end = p2;
+                            i += 1;
                         } else {
                             break;
                         }
+                    } else {
+                        break;
                     }
                 }
                 out.push(PathEl::LineTo(end));
@@ -626,6 +633,17 @@ fn cursor_before(els: &[PathEl], i: usize) -> Point {
         }
     }
     Point::new(0.0, 0.0)
+}
+
+/// Perpendicular distance from point `p` to the line through `a` and `b`.
+fn point_line_dist(p: Point, a: Point, b: Point) -> f64 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-10 {
+        return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
+    }
+    ((p.x - a.x) * dy - (p.y - a.y) * dx).abs() / len
 }
 
 /// Merge non-corner split-point indices that are within `min_gap` of each other.
