@@ -5,15 +5,19 @@
 //! 3. Sub-pixel vertex refinement
 //! 4. Alpha-based corner detection and Bezier curve generation
 
+pub mod curve;
 pub mod decompose;
 pub mod polygon;
-pub mod curve;
 
 use image::GrayImage;
 use kurbo::{Affine, BezPath, Vec2};
 use rayon::prelude::*;
 
 use crate::config::TracingConfig;
+
+/// Fraction of image dimensions a contour's bounding box must span to be
+/// classified as an image-frame artifact and discarded.
+const FRAME_CONTOUR_THRESHOLD: f64 = 0.9;
 
 /// Run the full vectorization pipeline: binary image → font-unit BezPaths.
 pub fn trace(gray: &GrayImage, config: &TracingConfig) -> Vec<BezPath> {
@@ -35,19 +39,29 @@ pub fn trace(gray: &GrayImage, config: &TracingConfig) -> Vec<BezPath> {
     if std::env::var("IMG2BEZ_DEBUG_PIXELS").is_ok() {
         eprintln!("  Debug       {} raw pixel contours", pixel_paths.len());
         for (i, pp) in pixel_paths.iter().enumerate() {
-            eprintln!("    contour {}: {} points, sign={}", i, pp.points.len(), pp.sign);
+            eprintln!(
+                "    contour {}: {} points, sign={}",
+                i,
+                pp.points.len(),
+                pp.sign
+            );
         }
     }
 
     // Stage 2-3: Optimal polygon + vertex refinement for each contour.
     let polygons: Vec<polygon::Polygon> = if std::env::var("IMG2BEZ_DEBUG_RAW_CONTOUR").is_ok() {
         // Debug: skip polygon — use raw pixel points as vertices
-        pixel_paths.iter().map(|pp| {
-            polygon::Polygon {
-                vertices: pp.points.iter().map(|&(x, y)| (x as f64, y as f64)).collect(),
+        pixel_paths
+            .iter()
+            .map(|pp| polygon::Polygon {
+                vertices: pp
+                    .points
+                    .iter()
+                    .map(|&(x, y)| (x as f64, y as f64))
+                    .collect(),
                 sign: pp.sign,
-            }
-        }).collect()
+            })
+            .collect()
     } else {
         pixel_paths.iter().map(polygon::optimal_polygon).collect()
     };
@@ -61,8 +75,8 @@ pub fn trace(gray: &GrayImage, config: &TracingConfig) -> Vec<BezPath> {
         accuracy: config.fit_accuracy / scale,
         smooth_iterations: config.smooth_iterations,
     };
-    let transform = Affine::scale(scale)
-        * Affine::translate(Vec2::new(0.0, config.y_offset / scale));
+    let transform =
+        Affine::scale(scale) * Affine::translate(Vec2::new(0.0, config.y_offset / scale));
 
     let paths: Vec<BezPath> = polygons
         .par_iter()
@@ -91,5 +105,6 @@ fn is_frame_contour(path: &decompose::PixelPath, img_w: i32, img_h: i32) -> bool
     }
     let pw = max_x - min_x;
     let ph = max_y - min_y;
-    pw as f64 > img_w as f64 * 0.9 && ph as f64 > img_h as f64 * 0.9
+    pw as f64 > img_w as f64 * FRAME_CONTOUR_THRESHOLD
+        && ph as f64 > img_h as f64 * FRAME_CONTOUR_THRESHOLD
 }

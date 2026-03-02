@@ -13,6 +13,11 @@ use kurbo::BezPath;
 
 use crate::config::TracingConfig;
 
+/// Maximum angle (in degrees) from exact H/V before a bezier handle is
+/// snapped to exact horizontal or vertical. 15deg catches residual
+/// off-axis handles introduced by grid snapping.
+const HV_HANDLE_SNAP_THRESHOLD_DEG: f64 = 15.0;
+
 /// Apply post-processing steps to traced contours.
 ///
 /// Three steps: fix direction → grid snap → H/V handles → chamfer.
@@ -25,16 +30,13 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
 
     if config.grid > 0 {
         let grid = config.grid as f64;
-        result = result
-            .iter()
-            .map(|p| snap::to_grid(p, grid))
-            .collect();
+        result = result.iter().map(|p| snap::to_grid(p, grid)).collect();
     }
 
     // One pass of H/V handle snapping catches grid-snap residuals.
     result = result
         .iter()
-        .map(|p| snap::hv_handles(p, 15.0))
+        .map(|p| snap::hv_handles(p, HV_HANDLE_SNAP_THRESHOLD_DEG))
         .collect();
 
     if config.chamfer_size > 0.0 {

@@ -12,6 +12,14 @@ use kurbo::{BezPath, ParamCurve, ParamCurveArclen, PathEl, PathSeg, Point, Rect,
 use crate::error::TraceError;
 use crate::TraceResult;
 
+/// Number of sample points per path set for shape distance computation.
+/// Higher values give more accurate Hausdorff/mean distance but cost O(n²).
+const SHAPE_SAMPLE_COUNT: usize = 256;
+
+/// Hausdorff distance at which the shape score drops to zero. A glyph
+/// whose worst-case point-to-point distance exceeds this is scored 0.0.
+const HAUSDORFF_ZERO_SCORE: f64 = 40.0;
+
 /// Collected bezier paths for evaluation.
 pub struct GlyphPaths {
     pub paths: Vec<BezPath>,
@@ -80,7 +88,14 @@ pub struct ContourMetric {
 }
 
 impl EvalReport {
-    /// Weighted overall score.
+    /// Weighted overall score (0.0–1.0).
+    ///
+    /// Weight rationale:
+    /// - **Shape (0.30)**: visual similarity is the primary goal.
+    /// - **Scale (0.15)**: wrong scale makes everything wrong.
+    /// - **H/V handles (0.15)**: critical for font editor usability.
+    /// - **Points, segments, grid, contours (0.10 each)**: structural
+    ///   metrics that matter but are secondary to visual match.
     pub fn overall(&self) -> f64 {
         self.scale.score * 0.15
             + self.shape.score * 0.30
@@ -116,13 +131,14 @@ pub fn from_trace_result(result: &TraceResult) -> GlyphPaths {
 
 // ── Path statistics ──────────────────────────────────────────────
 
-/// Counts extracted from a set of paths in a single pass.
+/// Segment and point counts extracted from a set of BezPaths in a single pass.
 struct PathStats {
     on_curve: usize,
     curves: usize,
     lines: usize,
 }
 
+/// Count on-curve points, curves, and lines across all paths.
 fn count_path_stats(paths: &[BezPath]) -> PathStats {
     let mut on_curve = 0;
     let mut curves = 0;
@@ -131,25 +147,48 @@ fn count_path_stats(paths: &[BezPath]) -> PathStats {
         for el in path.elements() {
             match el {
                 PathEl::MoveTo(_) => on_curve += 1,
-                PathEl::LineTo(_) => { on_curve += 1; lines += 1; }
-                PathEl::CurveTo(..) => { on_curve += 1; curves += 1; }
-                PathEl::QuadTo(..) => { on_curve += 1; curves += 1; }
+                PathEl::LineTo(_) => {
+                    on_curve += 1;
+                    lines += 1;
+                }
+                PathEl::CurveTo(..) => {
+                    on_curve += 1;
+                    curves += 1;
+                }
+                PathEl::QuadTo(..) => {
+                    on_curve += 1;
+                    curves += 1;
+                }
                 PathEl::ClosePath => {}
             }
         }
     }
-    PathStats { on_curve, curves, lines }
+    PathStats {
+        on_curve,
+        curves,
+        lines,
+    }
 }
 
+/// Fraction of segments that are lines (0.0–1.0).
 fn line_fraction(stats: &PathStats) -> f64 {
     let total = stats.curves + stats.lines;
-    if total == 0 { 0.0 } else { stats.lines as f64 / total as f64 }
+    if total == 0 {
+        0.0
+    } else {
+        stats.lines as f64 / total as f64
+    }
 }
 
 // ── Evaluation ───────────────────────────────────────────────────
 
 /// Compare traced output against a reference, producing an `EvalReport`.
-pub fn evaluate(traced: &GlyphPaths, reference: &GlyphPaths, grid: i32, ref_path: &str) -> EvalReport {
+pub fn evaluate(
+    traced: &GlyphPaths,
+    reference: &GlyphPaths,
+    grid: i32,
+    ref_path: &str,
+) -> EvalReport {
     let t_bbox = paths_bbox(&traced.paths);
     let r_bbox = paths_bbox(&reference.paths);
     let t_stats = count_path_stats(&traced.paths);
@@ -185,6 +224,7 @@ fn eval_scale(t_bbox: &Rect, r_bbox: &Rect) -> ScaleMetric {
 
 // ── Shape distance ───────────────────────────────────────────────
 
+/// Sample points along all path segments, proportional to arc length.
 fn sample_points(paths: &[BezPath], num_samples: usize) -> Vec<Point> {
     let mut total_len = 0.0;
     let mut seg_lens: Vec<(PathSeg, f64)> = Vec::new();
@@ -211,6 +251,7 @@ fn sample_points(paths: &[BezPath], num_samples: usize) -> Vec<Point> {
     samples
 }
 
+/// Union bounding box of all path segments.
 fn paths_bbox(paths: &[BezPath]) -> Rect {
     let mut bbox = Rect::ZERO;
     let mut first = true;
@@ -238,7 +279,11 @@ fn directed_hausdorff(from: &[Point], to: &[Point]) -> f64 {
         return f64::INFINITY;
     }
     from.iter()
-        .map(|a| to.iter().map(|b| a.distance(*b)).fold(f64::INFINITY, f64::min))
+        .map(|a| {
+            to.iter()
+                .map(|b| a.distance(*b))
+                .fold(f64::INFINITY, f64::min)
+        })
         .fold(0.0f64, f64::max)
 }
 
@@ -249,7 +294,11 @@ fn mean_nearest(from: &[Point], to: &[Point]) -> f64 {
     }
     let sum: f64 = from
         .iter()
-        .map(|a| to.iter().map(|b| a.distance(*b)).fold(f64::INFINITY, f64::min))
+        .map(|a| {
+            to.iter()
+                .map(|b| a.distance(*b))
+                .fold(f64::INFINITY, f64::min)
+        })
         .sum();
     sum / from.len() as f64
 }
@@ -260,9 +309,8 @@ fn eval_shape(
     t_bbox: &Rect,
     r_bbox: &Rect,
 ) -> ShapeMetric {
-    let n = 256;
-    let mut t_samples = sample_points(&traced.paths, n);
-    let r_samples = sample_points(&reference.paths, n);
+    let mut t_samples = sample_points(&traced.paths, SHAPE_SAMPLE_COUNT);
+    let r_samples = sample_points(&reference.paths, SHAPE_SAMPLE_COUNT);
 
     // Normalize traced samples: translate+scale to match reference bbox.
     let t_diag = bbox_diagonal(t_bbox).max(1.0);
@@ -293,7 +341,7 @@ fn eval_shape(
     let m_rt = mean_nearest(&r_samples, &t_samples);
     let mean = (m_tr + m_rt) / 2.0;
 
-    let score = (1.0 - hausdorff / 40.0).max(0.0);
+    let score = (1.0 - hausdorff / HAUSDORFF_ZERO_SCORE).max(0.0);
 
     ShapeMetric {
         hausdorff,
@@ -352,13 +400,19 @@ fn eval_hv_handles(traced: &GlyphPaths) -> HVHandleMetric {
                 PathEl::MoveTo(p) | PathEl::LineTo(p) => prev = p,
                 PathEl::CurveTo(a, b, p) => {
                     total += 2;
-                    if is_hv(prev, a) { aligned += 1; }
-                    if is_hv(p, b) { aligned += 1; }
+                    if is_hv(prev, a) {
+                        aligned += 1;
+                    }
+                    if is_hv(p, b) {
+                        aligned += 1;
+                    }
                     prev = p;
                 }
                 PathEl::QuadTo(a, p) => {
                     total += 1;
-                    if is_hv(prev, a) || is_hv(p, a) { aligned += 1; }
+                    if is_hv(prev, a) || is_hv(p, a) {
+                        aligned += 1;
+                    }
                     prev = p;
                 }
                 PathEl::ClosePath => {}
@@ -366,8 +420,16 @@ fn eval_hv_handles(traced: &GlyphPaths) -> HVHandleMetric {
         }
     }
 
-    let score = if total > 0 { aligned as f64 / total as f64 } else { 1.0 };
-    HVHandleMetric { aligned, total, score }
+    let score = if total > 0 {
+        aligned as f64 / total as f64
+    } else {
+        1.0
+    };
+    HVHandleMetric {
+        aligned,
+        total,
+        score,
+    }
 }
 
 fn is_hv(oncurve: Point, offcurve: Point) -> bool {
@@ -378,7 +440,12 @@ fn is_hv(oncurve: Point, offcurve: Point) -> bool {
 
 fn eval_grid(traced: &GlyphPaths, grid: i32) -> GridMetric {
     if grid <= 0 {
-        return GridMetric { grid_size: grid, on_grid: 0, total: 0, score: 1.0 };
+        return GridMetric {
+            grid_size: grid,
+            on_grid: 0,
+            total: 0,
+            score: 1.0,
+        };
     }
 
     let g = grid as f64;
@@ -399,8 +466,17 @@ fn eval_grid(traced: &GlyphPaths, grid: i32) -> GridMetric {
         }
     }
 
-    let score = if total > 0 { on_grid as f64 / total as f64 } else { 1.0 };
-    GridMetric { grid_size: grid, on_grid, total, score }
+    let score = if total > 0 {
+        on_grid as f64 / total as f64
+    } else {
+        1.0
+    };
+    GridMetric {
+        grid_size: grid,
+        on_grid,
+        total,
+        score,
+    }
 }
 
 // ── Contour count ────────────────────────────────────────────────
@@ -408,7 +484,11 @@ fn eval_grid(traced: &GlyphPaths, grid: i32) -> GridMetric {
 fn eval_contours(traced: &GlyphPaths, reference: &GlyphPaths) -> ContourMetric {
     let t = traced.paths.len();
     let r = reference.paths.len();
-    ContourMetric { traced: t, reference: r, score: if t == r { 1.0 } else { 0.0 } }
+    ContourMetric {
+        traced: t,
+        reference: r,
+        score: if t == r { 1.0 } else { 0.0 },
+    }
 }
 
 // ── Display ──────────────────────────────────────────────────────
@@ -418,30 +498,66 @@ impl fmt::Display for EvalReport {
         writeln!(f)?;
         writeln!(f, "  Eval vs {}", self.reference_path)?;
         writeln!(f)?;
-        writeln!(f, "  Scale         {:.0}x{:.0} vs {:.0}x{:.0}  ({:.2}x)                  {:.3}",
-            self.scale.traced_size.0, self.scale.traced_size.1,
-            self.scale.ref_size.0, self.scale.ref_size.1,
-            self.scale.ratio, self.scale.score)?;
-        writeln!(f, "  Shape         Hausdorff {:<5.1}  mean {:<5.1}  (normalized)      {:.3}",
-            self.shape.hausdorff, self.shape.mean, self.shape.score)?;
-        writeln!(f, "  Points        {} vs {} on-curve  (\u{00d7}{:.2})                   {:.3}",
-            self.points.traced, self.points.reference, self.points.ratio, self.points.score)?;
-        writeln!(f, "  Segments      {}c+{}l vs {}c+{}l  ({:.2} vs {:.2})            {:.3}",
-            self.segments.traced_curves, self.segments.traced_lines,
-            self.segments.ref_curves, self.segments.ref_lines,
-            self.segments.traced_line_frac, self.segments.ref_line_frac, self.segments.score)?;
-        writeln!(f, "  H/V handles   {}/{}  ({:.0}%)                                 {:.3}",
-            self.hv_handles.aligned, self.hv_handles.total,
-            self.hv_handles.score * 100.0, self.hv_handles.score)?;
+        writeln!(
+            f,
+            "  Scale         {:.0}x{:.0} vs {:.0}x{:.0}  ({:.2}x)                  {:.3}",
+            self.scale.traced_size.0,
+            self.scale.traced_size.1,
+            self.scale.ref_size.0,
+            self.scale.ref_size.1,
+            self.scale.ratio,
+            self.scale.score
+        )?;
+        writeln!(
+            f,
+            "  Shape         Hausdorff {:<5.1}  mean {:<5.1}  (normalized)      {:.3}",
+            self.shape.hausdorff, self.shape.mean, self.shape.score
+        )?;
+        writeln!(
+            f,
+            "  Points        {} vs {} on-curve  (\u{00d7}{:.2})                   {:.3}",
+            self.points.traced, self.points.reference, self.points.ratio, self.points.score
+        )?;
+        writeln!(
+            f,
+            "  Segments      {}c+{}l vs {}c+{}l  ({:.2} vs {:.2})            {:.3}",
+            self.segments.traced_curves,
+            self.segments.traced_lines,
+            self.segments.ref_curves,
+            self.segments.ref_lines,
+            self.segments.traced_line_frac,
+            self.segments.ref_line_frac,
+            self.segments.score
+        )?;
+        writeln!(
+            f,
+            "  H/V handles   {}/{}  ({:.0}%)                                 {:.3}",
+            self.hv_handles.aligned,
+            self.hv_handles.total,
+            self.hv_handles.score * 100.0,
+            self.hv_handles.score
+        )?;
         if self.grid.grid_size > 0 {
-            writeln!(f, "  Grid ({})      {}/{}  ({:.0}%)                                 {:.3}",
-                self.grid.grid_size, self.grid.on_grid, self.grid.total,
-                self.grid.score * 100.0, self.grid.score)?;
+            writeln!(
+                f,
+                "  Grid ({})      {}/{}  ({:.0}%)                                 {:.3}",
+                self.grid.grid_size,
+                self.grid.on_grid,
+                self.grid.total,
+                self.grid.score * 100.0,
+                self.grid.score
+            )?;
         } else {
-            writeln!(f, "  Grid          (off)                                        1.000")?;
+            writeln!(
+                f,
+                "  Grid          (off)                                        1.000"
+            )?;
         }
-        writeln!(f, "  Contours      {} vs {}                                       {:.3}",
-            self.contours.traced, self.contours.reference, self.contours.score)?;
+        writeln!(
+            f,
+            "  Contours      {} vs {}                                       {:.3}",
+            self.contours.traced, self.contours.reference, self.contours.score
+        )?;
         writeln!(f)?;
         writeln!(f, "  Overall       {:.3}", self.overall())?;
         Ok(())

@@ -5,7 +5,11 @@
 
 use kurbo::{BezPath, PathEl, Point, Vec2};
 
-/// Skip chamfering when edges are nearly collinear (cosine threshold).
+/// Skip chamfering when edges are nearly collinear.
+///
+/// cos(18°) ≈ 0.951. Corners whose edges form an angle of less than
+/// ~18° from straight (i.e., cos > 0.95) are too shallow to chamfer
+/// meaningfully and would produce barely-visible bevels.
 const COLLINEAR_THRESHOLD: f64 = 0.95;
 
 /// Add 45° chamfers at line-line corners.

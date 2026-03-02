@@ -7,6 +7,26 @@ use std::path::Path;
 
 use kurbo::{BezPath, PathEl};
 
+// ── Comparison panel layout ──────────────────────────────
+
+/// Width and height of each comparison panel in pixels.
+const PANEL_WIDTH: u32 = 800;
+const PANEL_HEIGHT: u32 = 800;
+
+/// Padding around the content area within each panel.
+const PANEL_PADDING: u32 = 20;
+
+/// Width of the grey separator bar between panels.
+const PANEL_SEPARATOR: u32 = 2;
+
+// ── Raster comparison layout ─────────────────────────────
+
+/// Square canvas size for raster IoU comparison rendering.
+const RASTER_CANVAS_SIZE: u32 = 600;
+
+/// Padding around the glyph in the raster comparison canvas.
+const RASTER_PADDING: f64 = 20.0;
+
 /// Convert a kurbo `BezPath` to a `tiny_skia::Path`.
 fn kurbo_to_tinyskia(
     bezpath: &BezPath,
@@ -44,10 +64,7 @@ fn kurbo_to_tinyskia(
 fn transform_point(x: f64, y: f64, t: tiny_skia::Transform) -> (f32, f32) {
     let x = x as f32;
     let y = y as f32;
-    (
-        t.sx * x + t.kx * y + t.tx,
-        t.ky * x + t.sy * y + t.ty,
-    )
+    (t.sx * x + t.kx * y + t.tx, t.ky * x + t.sy * y + t.ty)
 }
 
 /// Encode a pixmap to PNG bytes.
@@ -78,10 +95,10 @@ pub fn render_comparison(
     y_offset: f64,
     reposition_shift: (f64, f64),
 ) -> Result<(), std::io::Error> {
-    let panel_h: u32 = 800;
-    let panel_w: u32 = 800;
-    let padding: u32 = 20;
-    let separator: u32 = 2;
+    let panel_h: u32 = PANEL_HEIGHT;
+    let panel_w: u32 = PANEL_WIDTH;
+    let padding: u32 = PANEL_PADDING;
+    let separator: u32 = PANEL_SEPARATOR;
 
     let content_w = (panel_w - padding * 2) as f32;
     let content_h = (panel_h - padding * 2) as f32;
@@ -120,8 +137,7 @@ pub fn render_comparison(
             let dst_x = ox + x;
             let dst_y = oy + y;
             if dst_x < panel_w && dst_y < panel_h {
-                let pm =
-                    tiny_skia::PremultipliedColorU8::from_rgba(luma, luma, luma, 255).unwrap();
+                let pm = tiny_skia::PremultipliedColorU8::from_rgba(luma, luma, luma, 255).unwrap();
                 source_panel.pixels_mut()[(dst_y * panel_w + dst_x) as usize] = pm;
             }
         }
@@ -153,9 +169,18 @@ pub fn render_comparison(
     // where s = img_scale / font_scale
     let (dx, dy) = reposition_shift;
     let s = img_scale as f64 / font_scale;
-    eprintln!("  Render      src={}x{} img_scale={:.4} font_scale={:.4} s={:.6}", src_w, src_h, img_scale, font_scale, s);
-    eprintln!("  Render      rendered={}x{} ox={} oy={} padding={}", rendered_w, rendered_h, ox, oy, padding);
-    eprintln!("  Render      dx={:.1} dy={:.1} y_offset={:.1}", dx, dy, y_offset);
+    eprintln!(
+        "  Render      src={}x{} img_scale={:.4} font_scale={:.4} s={:.6}",
+        src_w, src_h, img_scale, font_scale, s
+    );
+    eprintln!(
+        "  Render      rendered={}x{} ox={} oy={} padding={}",
+        rendered_w, rendered_h, ox, oy, padding
+    );
+    eprintln!(
+        "  Render      dx={:.1} dy={:.1} y_offset={:.1}",
+        dx, dy, y_offset
+    );
     let tx = (ox as f64 - s * dx) as f32;
     let ty = (oy as f64 + rendered_h as f64 + s * (dy + y_offset)) as f32;
     eprintln!("  Render      tx={:.2} ty={:.2}", tx, ty);
@@ -250,8 +275,11 @@ pub fn render_comparison(
         black.anti_alias = false;
         if let Some(sk_path) = kurbo_to_tinyskia(&combined, t1x1) {
             contour_pm.fill_path(
-                &sk_path, &black, tiny_skia::FillRule::EvenOdd,
-                tiny_skia::Transform::identity(), None,
+                &sk_path,
+                &black,
+                tiny_skia::FillRule::EvenOdd,
+                tiny_skia::Transform::identity(),
+                None,
             );
         }
         // Compare: count pixels that differ
@@ -272,8 +300,14 @@ pub fn render_comparison(
                 }
             }
         }
-        eprintln!("  PixelDiff   overlap={} source_only={} contour_only={} total_src={} total_cnt={}",
-            both, source_only, contour_only, both + source_only, both + contour_only);
+        eprintln!(
+            "  PixelDiff   overlap={} source_only={} contour_only={} total_src={} total_cnt={}",
+            both,
+            source_only,
+            contour_only,
+            both + source_only,
+            both + contour_only
+        );
         // Save the diff image: green=overlap, red=contour-only, blue=source-only
         let mut diff_pm = tiny_skia::Pixmap::new(src_w, src_h).unwrap();
         diff_pm.fill(tiny_skia::Color::WHITE);
@@ -284,17 +318,24 @@ pub fn render_comparison(
                 let cnt_is_black = cnt_px.red() < 128;
                 let src_is_black = src_px < 128;
                 let color = match (src_is_black, cnt_is_black) {
-                    (true, true) => tiny_skia::PremultipliedColorU8::from_rgba(0, 128, 0, 255).unwrap(),
-                    (true, false) => tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 255, 255).unwrap(),
-                    (false, true) => tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap(),
+                    (true, true) => {
+                        tiny_skia::PremultipliedColorU8::from_rgba(0, 128, 0, 255).unwrap()
+                    }
+                    (true, false) => {
+                        tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 255, 255).unwrap()
+                    }
+                    (false, true) => {
+                        tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap()
+                    }
                     (false, false) => continue,
                 };
                 diff_pm.pixels_mut()[(y * src_w + x) as usize] = color;
             }
         }
-        let diff_path = output_path.with_file_name(
-            format!("{}_pixeldiff.png", output_path.file_stem().unwrap().to_str().unwrap())
-        );
+        let diff_path = output_path.with_file_name(format!(
+            "{}_pixeldiff.png",
+            output_path.file_stem().unwrap().to_str().unwrap()
+        ));
         std::fs::write(&diff_path, encode_png(&diff_pm))?;
         eprintln!("  PixelDiff   saved {}", diff_path.display());
     }
@@ -329,14 +370,16 @@ pub fn raster_compare(
 ) -> Result<RasterCompare, std::io::Error> {
     use kurbo::Shape;
 
-    let canvas_size: u32 = 600;
-    let padding: f64 = 20.0;
+    let canvas_size: u32 = RASTER_CANVAS_SIZE;
+    let padding: f64 = RASTER_PADDING;
 
     // Union bounding box of both path sets.
-    let t_bbox = traced_paths.iter()
+    let t_bbox = traced_paths
+        .iter()
         .map(|p| p.bounding_box())
         .reduce(|a, b| a.union(b));
-    let r_bbox = reference_paths.iter()
+    let r_bbox = reference_paths
+        .iter()
         .map(|p| p.bounding_box())
         .reduce(|a, b| a.union(b));
 
@@ -344,7 +387,13 @@ pub fn raster_compare(
         (Some(t), Some(r)) => (t, r),
         _ => {
             let diff_path = output_dir.join(format!("{}_raster_diff.png", glyph_name));
-            return Ok(RasterCompare { iou: 0.0, traced_px: 0, ref_px: 0, overlap_px: 0, diff_path });
+            return Ok(RasterCompare {
+                iou: 0.0,
+                traced_px: 0,
+                ref_px: 0,
+                overlap_px: 0,
+                diff_path,
+            });
         }
     };
 
@@ -392,18 +441,38 @@ pub fn raster_compare(
     paint.anti_alias = false; // crisp comparison
 
     let mut combined_traced = BezPath::new();
-    for p in traced_paths { for el in p.elements() { combined_traced.push(*el); } }
+    for p in traced_paths {
+        for el in p.elements() {
+            combined_traced.push(*el);
+        }
+    }
     if let Some(sk) = kurbo_to_tinyskia(&combined_traced, traced_transform) {
-        traced_pm.fill_path(&sk, &paint, tiny_skia::FillRule::EvenOdd, tiny_skia::Transform::identity(), None);
+        traced_pm.fill_path(
+            &sk,
+            &paint,
+            tiny_skia::FillRule::EvenOdd,
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 
     // Render reference.
     let mut ref_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).unwrap();
     ref_pm.fill(tiny_skia::Color::WHITE);
     let mut combined_ref = BezPath::new();
-    for p in reference_paths { for el in p.elements() { combined_ref.push(*el); } }
+    for p in reference_paths {
+        for el in p.elements() {
+            combined_ref.push(*el);
+        }
+    }
     if let Some(sk) = kurbo_to_tinyskia(&combined_ref, ref_transform) {
-        ref_pm.fill_path(&sk, &paint, tiny_skia::FillRule::EvenOdd, tiny_skia::Transform::identity(), None);
+        ref_pm.fill_path(
+            &sk,
+            &paint,
+            tiny_skia::FillRule::EvenOdd,
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 
     // Compare pixels.
@@ -419,9 +488,18 @@ pub fn raster_compare(
         let t_black = traced_pm.pixels()[i].red() < 128;
         let r_black = ref_pm.pixels()[i].red() < 128;
         let color = match (t_black, r_black) {
-            (true, true)   => { overlap += 1; tiny_skia::PremultipliedColorU8::from_rgba(0, 180, 0, 255).unwrap() }
-            (true, false)  => { traced_only += 1; tiny_skia::PremultipliedColorU8::from_rgba(220, 60, 60, 255).unwrap() }
-            (false, true)  => { ref_only += 1; tiny_skia::PremultipliedColorU8::from_rgba(60, 60, 220, 255).unwrap() }
+            (true, true) => {
+                overlap += 1;
+                tiny_skia::PremultipliedColorU8::from_rgba(0, 180, 0, 255).unwrap()
+            }
+            (true, false) => {
+                traced_only += 1;
+                tiny_skia::PremultipliedColorU8::from_rgba(220, 60, 60, 255).unwrap()
+            }
+            (false, true) => {
+                ref_only += 1;
+                tiny_skia::PremultipliedColorU8::from_rgba(60, 60, 220, 255).unwrap()
+            }
             (false, false) => continue,
         };
         diff_pm.pixels_mut()[i] = color;
@@ -430,10 +508,20 @@ pub fn raster_compare(
     let traced_px = overlap + traced_only;
     let ref_px = overlap + ref_only;
     let union_px = traced_px + ref_only;
-    let iou = if union_px > 0 { overlap as f64 / union_px as f64 } else { 1.0 };
+    let iou = if union_px > 0 {
+        overlap as f64 / union_px as f64
+    } else {
+        1.0
+    };
 
     let diff_path = output_dir.join(format!("{}_raster_diff.png", glyph_name));
     std::fs::write(&diff_path, encode_png(&diff_pm))?;
 
-    Ok(RasterCompare { iou, traced_px, ref_px, overlap_px: overlap, diff_path })
+    Ok(RasterCompare {
+        iou,
+        traced_px,
+        ref_px,
+        overlap_px: overlap,
+        diff_path,
+    })
 }

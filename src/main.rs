@@ -1,3 +1,9 @@
+//! CLI entry point for the img2bez bitmap-to-vector tracer.
+//!
+//! Reads a bitmap image, traces it to cubic bezier contours, and inserts
+//! the resulting glyph into a UFO font source. Optionally compares the
+//! output against a hand-drawn reference `.glif` file.
+
 use clap::Parser;
 use img2bez::TracingConfig;
 use std::path::PathBuf;
@@ -98,7 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Header
-    let unicode_str = cli.unicode.as_deref()
+    let unicode_str = cli
+        .unicode
+        .as_deref()
         .map(|u| format!(" (U+{})", u.to_uppercase()))
         .unwrap_or_default();
     eprintln!();
@@ -122,22 +130,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let reference = img2bez::eval::load_glif(ref_path)?;
 
         // Raster comparison (primary metric: visual similarity)
-        let output_dir = cli.output.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let output_dir = cli
+            .output
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         let raster = img2bez::render::raster_compare(
-            &traced.paths, &reference.paths, output_dir, &cli.name,
+            &traced.paths,
+            &reference.paths,
+            output_dir,
+            &cli.name,
         )?;
         eprintln!();
-        eprintln!("  Raster IoU  {:.1}%  (overlap={} traced={} ref={})",
-            raster.iou * 100.0, raster.overlap_px, raster.traced_px, raster.ref_px);
+        eprintln!(
+            "  Raster IoU  {:.1}%  (overlap={} traced={} ref={})",
+            raster.iou * 100.0,
+            raster.overlap_px,
+            raster.traced_px,
+            raster.ref_px
+        );
         eprintln!("  Diff        {}", raster.diff_path.display());
 
         // Geometric metrics (secondary)
-        let report = img2bez::eval::evaluate(&traced, &reference, cli.grid, &ref_path.display().to_string());
+        let report = img2bez::eval::evaluate(
+            &traced,
+            &reference,
+            cli.grid,
+            &ref_path.display().to_string(),
+        );
         eprint!("{}", report);
     }
 
     // Always render visual comparison: source image vs traced output
-    let comparison_path = cli.output.parent()
+    let comparison_path = cli
+        .output
+        .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join(format!("{}_comparison.png", cli.name));
     let font_scale = cli.target_height / {
@@ -145,8 +171,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         img.height() as f64
     };
     img2bez::render::render_comparison(
-        &cli.input, &result.paths, &comparison_path,
-        font_scale, cli.y_offset, result.reposition_shift,
+        &cli.input,
+        &result.paths,
+        &comparison_path,
+        font_scale,
+        cli.y_offset,
+        result.reposition_shift,
     )?;
     eprintln!("  Compare     {}", comparison_path.display());
 

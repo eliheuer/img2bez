@@ -14,14 +14,28 @@
 //! // result.paths contains Vec<kurbo::BezPath>
 //! # Ok::<(), img2bez::TraceError>(())
 //! ```
+//!
+//! # Debug environment variables
+//!
+//! | Variable                      | Effect                                           |
+//! |-------------------------------|--------------------------------------------------|
+//! | `IMG2BEZ_DEBUG_BITMAP`        | Save thresholded bitmap as `debug_threshold.png` |
+//! | `IMG2BEZ_DEBUG_PIXELS`        | Print raw pixel contour stats                   |
+//! | `IMG2BEZ_DEBUG_RAW_CONTOUR`   | Skip polygon optimization, use raw pixel points |
+//! | `IMG2BEZ_DEBUG_NO_ADJUST`     | Skip sub-pixel vertex refinement                |
+//! | `IMG2BEZ_DEBUG_POLYGON`       | Output polygon as straight lines (no curves)    |
+//! | `IMG2BEZ_DEBUG_SPLITS`        | Print split-point analysis per contour           |
+//! | `IMG2BEZ_DEBUG_FIT`           | Print per-section curve fitting details          |
+//! | `IMG2BEZ_DEBUG_NO_CLEANUP`    | Skip all post-processing (direction/snap/chamfer)|
+//! | `IMG2BEZ_DEBUG_PIXELDIFF`     | Save 1:1 pixel diff image                       |
 
 #![forbid(unsafe_code)]
 
 mod bitmap;
+mod cleanup;
 mod config;
 mod geom;
 mod metrics;
-mod cleanup;
 mod vectorize;
 
 pub mod error;
@@ -93,7 +107,10 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
     let (raw_curves, raw_lines) = count_segments(&curves);
     eprintln!(
         "  Trace       {} contours \u{2192} {} curves + {} lines  (scale \u{00d7}{:.2})",
-        curves.len(), raw_curves, raw_lines, scale,
+        curves.len(),
+        raw_curves,
+        raw_lines,
+        scale,
     );
 
     // ── Post-processing ───────────────────────────────────
@@ -115,27 +132,46 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
         })
         .collect();
     let mut steps: Vec<&str> = Vec::new();
-    if config.fix_direction { steps.push("direction"); }
-    if config.grid > 0 { steps.push("grid snap"); }
+    if config.fix_direction {
+        steps.push("direction");
+    }
+    if config.grid > 0 {
+        steps.push("grid snap");
+    }
     steps.push("H/V snap");
-    if config.chamfer_size > 0.0 { steps.push("chamfer"); }
+    if config.chamfer_size > 0.0 {
+        steps.push("chamfer");
+    }
     eprintln!("  Clean       {}", steps.join(" \u{00b7} "));
 
     // ── Metrics ───────────────────────────────────────────
     // Debug: show bounding box before reposition
     {
         use kurbo::Shape;
-        if let Some(bb) = paths.iter().map(|p| p.bounding_box()).reduce(|a: kurbo::Rect, b| a.union(b)) {
-            eprintln!("  Pre-repos   bbox x=[{:.1}, {:.1}] y=[{:.1}, {:.1}]", bb.x0, bb.x1, bb.y0, bb.y1);
+        if let Some(bb) = paths
+            .iter()
+            .map(|p| p.bounding_box())
+            .reduce(|a: kurbo::Rect, b| a.union(b))
+        {
+            eprintln!(
+                "  Pre-repos   bbox x=[{:.1}, {:.1}] y=[{:.1}, {:.1}]",
+                bb.x0, bb.x1, bb.y0, bb.y1
+            );
         }
     }
     let (paths, reposition_shift) = metrics::reposition(&paths, config.lsb, config.grid);
-    eprintln!("  Reposition  shift=({:.1}, {:.1})  lsb={:.1}", reposition_shift.0, reposition_shift.1, config.lsb);
+    eprintln!(
+        "  Reposition  shift=({:.1}, {:.1})  lsb={:.1}",
+        reposition_shift.0, reposition_shift.1, config.lsb
+    );
     let advance_width = config
         .advance_width
         .unwrap_or_else(|| metrics::advance_from_bounds(&paths, config.rsb));
 
-    let n_outer = contour_types.iter().filter(|t| **t == ContourType::Outer).count();
+    let n_outer = contour_types
+        .iter()
+        .filter(|t| **t == ContourType::Outer)
+        .count();
     let n_counter = contour_types.len() - n_outer;
     let (on, off) = count_points(&paths);
     let elapsed = t_start.elapsed().as_millis();
@@ -176,9 +212,17 @@ fn count_points(paths: &[BezPath]) -> (usize, usize) {
     for path in paths {
         for el in path.elements() {
             match el {
-                PathEl::CurveTo(..) => { on += 1; off += 2; }
-                PathEl::LineTo(_) => { on += 1; }
-                PathEl::QuadTo(..) => { on += 1; off += 1; }
+                PathEl::CurveTo(..) => {
+                    on += 1;
+                    off += 2;
+                }
+                PathEl::LineTo(_) => {
+                    on += 1;
+                }
+                PathEl::QuadTo(..) => {
+                    on += 1;
+                    off += 1;
+                }
                 _ => {}
             }
         }

@@ -1,3 +1,9 @@
+//! Error types for the tracing pipeline.
+//!
+//! Each stage of the pipeline (image loading, contour extraction, path
+//! conversion, UFO output) maps its failures into a single `TraceError`
+//! enum so callers get one error type to handle.
+
 use thiserror::Error;
 
 /// Errors that can occur during image tracing.

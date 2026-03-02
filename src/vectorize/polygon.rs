@@ -47,8 +47,15 @@ pub struct Polygon {
 pub fn optimal_polygon(path: &PixelPath) -> Polygon {
     let n = path.points.len();
     if n < 4 {
-        let vertices = path.points.iter().map(|&(x, y)| (x as f64, y as f64)).collect();
-        return Polygon { vertices, sign: path.sign };
+        let vertices = path
+            .points
+            .iter()
+            .map(|&(x, y)| (x as f64, y as f64))
+            .collect();
+        return Polygon {
+            vertices,
+            sign: path.sign,
+        };
     }
 
     let (sums, x0, y0) = calc_sums(&path.points);
@@ -56,7 +63,9 @@ pub fn optimal_polygon(path: &PixelPath) -> Polygon {
     let po = best_polygon(&path.points, &lon, &sums, x0, y0);
     let vertices = if std::env::var("IMG2BEZ_DEBUG_NO_ADJUST").is_ok() {
         // Debug: skip sub-pixel adjustment, use raw DP vertex positions
-        po.iter().map(|&i| (path.points[i].0 as f64, path.points[i].1 as f64)).collect()
+        po.iter()
+            .map(|&i| (path.points[i].0 as f64, path.points[i].1 as f64))
+            .collect()
     } else {
         adjust_vertices(&path.points, &po, &sums, x0, y0)
     };
@@ -70,6 +79,11 @@ pub fn optimal_polygon(path: &PixelPath) -> Polygon {
 // ── Prefix sums ──────────────────────────────────────────
 
 /// Compute prefix sums for O(1) range queries on line-fit statistics.
+///
+/// For any sub-range [i..j], the sums of x, y, x², xy, y² can be
+/// retrieved in O(1) as `sums[j+1] - sums[i]` (with a cyclic wrap
+/// correction when j < i). These statistics are sufficient to compute
+/// the best-fit line and its RMS error for any sub-range.
 fn calc_sums(pt: &[(i32, i32)]) -> (Vec<Sums>, i32, i32) {
     let n = pt.len();
     let x0 = pt[0].0;
@@ -95,6 +109,36 @@ fn calc_sums(pt: &[(i32, i32)]) -> (Vec<Sums>, i32, i32) {
 
 /// For each vertex i, compute the farthest vertex reachable by a straight line
 /// that stays within 0.5 units of all intermediate points.
+///
+/// ## Algorithm: constraint propagation
+///
+/// Starting from vertex `i`, we walk forward through vertices, maintaining
+/// two constraint vectors that define an angular corridor. The corridor
+/// represents all line directions from `i` that would keep every visited
+/// vertex within ±0.5 pixels of the line.
+///
+/// At each step we check:
+/// 1. **Four-direction test**: if the path has moved in all 4 cardinal
+///    directions (N, S, E, W), no single straight line can approximate it.
+/// 2. **Constraint violation**: if the current vertex falls outside the
+///    angular corridor (checked via cross products against the two
+///    constraint vectors).
+/// 3. **Constraint tightening**: each new vertex that is >1 pixel from `i`
+///    narrows the corridor by shifting the constraint half a pixel toward
+///    the vertex's side.
+///
+/// ### Direction index formula
+///
+/// The expression `(3 + 3*dkx + dky) / 2` maps a cardinal step (dx, dy)
+/// to a direction index 0–3:
+///
+/// ```text
+///   (dx, dy) → (3 + 3*dx + dy) / 2
+///   (-1,  0) → (3 - 3 + 0) / 2 = 0   West
+///   ( 0, -1) → (3 + 0 - 1) / 2 = 1   South
+///   ( 0,  1) → (3 + 0 + 1) / 2 = 2   North
+///   ( 1,  0) → (3 + 3 + 0) / 2 = 3   East
+/// ```
 #[allow(clippy::needless_range_loop)]
 fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
     let n = pt.len();
@@ -150,16 +194,36 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
             // Update constraints (skip when |cur| <= 1 — no constraint).
             if !(cur.0.abs() <= 1 && cur.1.abs() <= 1) {
                 let off0 = (
-                    cur.0 + if cur.1 >= 0 && (cur.1 > 0 || cur.0 < 0) { 1 } else { -1 },
-                    cur.1 + if cur.0 <= 0 && (cur.0 < 0 || cur.1 < 0) { 1 } else { -1 },
+                    cur.0
+                        + if cur.1 >= 0 && (cur.1 > 0 || cur.0 < 0) {
+                            1
+                        } else {
+                            -1
+                        },
+                    cur.1
+                        + if cur.0 <= 0 && (cur.0 < 0 || cur.1 < 0) {
+                            1
+                        } else {
+                            -1
+                        },
                 );
                 if xprod(constraint[0], off0) >= 0 {
                     constraint[0] = off0;
                 }
 
                 let off1 = (
-                    cur.0 + if cur.1 <= 0 && (cur.1 < 0 || cur.0 < 0) { 1 } else { -1 },
-                    cur.1 + if cur.0 >= 0 && (cur.0 > 0 || cur.1 < 0) { 1 } else { -1 },
+                    cur.0
+                        + if cur.1 <= 0 && (cur.1 < 0 || cur.0 < 0) {
+                            1
+                        } else {
+                            -1
+                        },
+                    cur.1
+                        + if cur.0 >= 0 && (cur.0 > 0 || cur.1 < 0) {
+                            1
+                        } else {
+                            -1
+                        },
                 );
                 if xprod(constraint[1], off1) <= 0 {
                     constraint[1] = off1;
@@ -203,9 +267,16 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
 
 /// Compute the exact pivot index when a constraint is violated.
 ///
-/// Uses linear interpolation between the last valid vertex (k1) and the
-/// violating vertex (k) to find the precise fractional point where the
-/// line first exits the ±0.5 corridor.
+/// When the angular corridor is violated at vertex `k`, we need the exact
+/// fractional index where the line first exits the ±0.5 envelope. This
+/// uses linear interpolation between the last valid vertex (`k1`) and the
+/// violating vertex (`k`).
+///
+/// The cross products `a = cross(constraint, cur_at_k1)` and
+/// `b = cross(constraint, step_direction)` give the signed distance to
+/// the constraint line at k1 and the rate of change per step. The
+/// violation occurs at step `j = floor(a / -b)` (or `floor(-c / d)` for
+/// the other constraint), whichever comes first.
 fn pivot_at_violation(
     pt: &[(i32, i32)],
     constraint: &[(i32, i32); 2],
@@ -241,13 +312,7 @@ fn pivot_at_violation(
 ///
 /// Returns polygon vertex indices into the original path.
 #[allow(clippy::needless_range_loop)]
-fn best_polygon(
-    pt: &[(i32, i32)],
-    lon: &[usize],
-    sums: &[Sums],
-    x0: i32,
-    y0: i32,
-) -> Vec<usize> {
+fn best_polygon(pt: &[(i32, i32)], lon: &[usize], sums: &[Sums], x0: i32, y0: i32) -> Vec<usize> {
     let n = pt.len();
 
     // clip0[i] = farthest vertex reachable from i (clipping interval).
@@ -348,16 +413,21 @@ fn best_polygon(
 
 /// Penalty for approximating path segment [i..j] with a straight line.
 ///
-/// Returns the RMS distance of points from the best-fit line through
-/// the midpoint of i and j, projected onto the perpendicular direction.
-fn penalty3(
-    pt: &[(i32, i32)],
-    sums: &[Sums],
-    x0: i32,
-    y0: i32,
-    i: usize,
-    j: usize,
-) -> f64 {
+/// Uses a quadratic form to compute the RMS perpendicular distance of all
+/// points from the line through the midpoint of vertices i and j, directed
+/// perpendicular to the segment i→j:
+///
+/// ```text
+///   px, py  = midpoint of (pt[i], pt[j])
+///   ex, ey  = perpendicular direction: (-(j.y - i.y), j.x - i.x)
+///   a       = E[x²] - 2·E[x]·px + px²
+///   b       = E[xy] - E[x]·py - E[y]·px + px·py
+///   c       = E[y²] - 2·E[y]·py + py²
+///   penalty = sqrt(ex²·a + 2·ex·ey·b + ey²·c)
+/// ```
+///
+/// All expectations are computed in O(1) via prefix sums.
+fn penalty3(pt: &[(i32, i32)], sums: &[Sums], x0: i32, y0: i32, i: usize, j: usize) -> f64 {
     let n = sums.len() - 1;
     let jn = j % n; // cyclic index into pt[]
 
@@ -396,9 +466,18 @@ fn penalty3(
 
 /// Refine each polygon vertex to the optimal sub-pixel position.
 ///
-/// For each vertex, solves a quadratic optimization: minimize the sum of
-/// squared distances to the two adjacent line segments, constrained to
-/// lie within ±0.5 of the original pixel corner.
+/// For each vertex, builds a 3×3 quadratic form Q = Q_prev + Q_next from
+/// the two adjacent line segments (computed by `point_slope()`). Each Q
+/// encodes the squared perpendicular distance to a line as:
+///
+/// ```text
+///   dist²(x, y) = [x, y, 1] · Q · [x, y, 1]ᵀ
+/// ```
+///
+/// The unconstrained minimum is found by solving the 2×2 linear system
+/// from the top-left block of Q. If the solution lies within ±0.5 of the
+/// original pixel corner, it is used directly. Otherwise, the minimum on
+/// the boundary of the ±0.5 box is found by `constrain_to_box()`.
 fn adjust_vertices(
     pt: &[(i32, i32)],
     po: &[usize],
@@ -428,10 +507,7 @@ fn adjust_vertices(
         // Build quadratic form Q for each segment: Q = v * v^T / d
         // where v = (dir.y, -dir.x, -(dir.y*ctr.x - dir.x*ctr.y))
         // Minimize (p, 1)^T * (Q_a + Q_b) * (p, 1) over p.
-        let q = add_quadform(
-            &make_quadform(ctr_a, dir_a),
-            &make_quadform(ctr_b, dir_b),
-        );
+        let q = add_quadform(&make_quadform(ctr_a, dir_a), &make_quadform(ctr_b, dir_b));
 
         // Solve the 2x2 system.
         let det = q[0][0] * q[1][1] - q[0][1] * q[1][0];
@@ -461,6 +537,12 @@ fn adjust_vertices(
 /// Compute the best-fit line through a path segment [a..b].
 ///
 /// Returns (centroid, direction_unit_vector).
+///
+/// The direction is the eigenvector of the 2×2 covariance matrix
+/// corresponding to its largest eigenvalue (the axis of maximum
+/// variance). For a 2×2 symmetric matrix [[a, b], [b, c]], the
+/// eigenvalues are `(a + c ± sqrt((a-c)² + 4b²)) / 2`. The
+/// eigenvector for λ is found from `(A - λI)v = 0`.
 fn point_slope(
     pt: &[(i32, i32)],
     sums: &[Sums],
@@ -479,10 +561,7 @@ fn point_slope(
     };
 
     if k == 0 {
-        return (
-            (pt[a].0 as f64, pt[a].1 as f64),
-            (1.0, 0.0),
-        );
+        return ((pt[a].0 as f64, pt[a].1 as f64), (1.0, 0.0));
     }
 
     let x = sums[bn + 1].x - sums[a].x + r as f64 * sums[n].x;
@@ -545,6 +624,7 @@ fn make_quadform(ctr: (f64, f64), dir: (f64, f64)) -> [[f64; 3]; 3] {
     q
 }
 
+/// Element-wise sum of two 3×3 quadratic forms.
 fn add_quadform(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
     let mut q = [[0.0f64; 3]; 3];
     for l in 0..3 {
@@ -658,17 +738,25 @@ fn cyclic(a: usize, b: usize, c: usize, _n: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::decompose::PixelPath;
+    use super::*;
 
     #[test]
     fn rectangle_produces_4_vertices() {
         // 4x4 rectangle: top → right → bottom → left edges.
         let mut points: Vec<(i32, i32)> = Vec::new();
-        for x in 0..4 { points.push((x, 4)); }
-        for y in (0..4).rev() { points.push((4, y)); }
-        for x in (0..4).rev() { points.push((x, 0)); }
-        for y in 0..4 { points.push((0, y)); }
+        for x in 0..4 {
+            points.push((x, 4));
+        }
+        for y in (0..4).rev() {
+            points.push((4, y));
+        }
+        for x in (0..4).rev() {
+            points.push((x, 0));
+        }
+        for y in 0..4 {
+            points.push((0, y));
+        }
 
         let path = PixelPath { points, sign: 1 };
         let poly = optimal_polygon(&path);

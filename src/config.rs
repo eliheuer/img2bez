@@ -78,21 +78,21 @@ pub enum ThresholdMethod {
 impl Default for TracingConfig {
     fn default() -> Self {
         Self {
-            threshold: ThresholdMethod::Otsu,
+            threshold: ThresholdMethod::Otsu, // adaptive, works for most scans
             invert: false,
-            min_contour_area: 100.0,
-            fit_accuracy: 4.0,
-            smooth_iterations: 3,
-            alphamax: 1.0,
-            grid: 0,
-            fix_direction: true,
-            chamfer_size: 0.0,
-            chamfer_min_edge: 40.0,
-            advance_width: None,
-            lsb: 50.0,
-            rsb: 50.0,
-            target_height: 1000.0,
-            y_offset: 0.0,
+            min_contour_area: 100.0, // ~10×10 px: filters dust/noise
+            fit_accuracy: 4.0,       // font units; 2–4 is good for type
+            smooth_iterations: 3,    // removes pixel staircase; >5 loses detail
+            alphamax: 1.0,           // ~45° corner threshold; 0.6 for geometric type
+            grid: 0,                 // off by default; set 2 for VG
+            fix_direction: true,     // required for correct font rendering
+            chamfer_size: 0.0,       // off; 16 for Virtua Grotesk style
+            chamfer_min_edge: 40.0,  // don't chamfer edges shorter than this
+            advance_width: None,     // auto-compute from bbox + sidebearings
+            lsb: 50.0,               // left sidebearing in font units
+            rsb: 50.0,               // right sidebearing in font units
+            target_height: 1000.0,   // UPM-relative; 1088 for VG (asc-desc)
+            y_offset: 0.0,           // set to descender (e.g. -256) to align baseline
             codepoints: vec![],
         }
     }

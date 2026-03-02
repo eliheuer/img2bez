@@ -14,10 +14,7 @@ use kurbo::{BezPath, PathEl, Point};
 /// preserving curve shape accuracy while keeping on-curve points on-grid.
 pub fn to_grid(path: &BezPath, grid: f64) -> BezPath {
     let snap = |p: Point| -> Point {
-        Point::new(
-            (p.x / grid).round() * grid,
-            (p.y / grid).round() * grid,
-        )
+        Point::new((p.x / grid).round() * grid, (p.y / grid).round() * grid)
     };
     BezPath::from_vec(
         path.elements()
@@ -25,9 +22,7 @@ pub fn to_grid(path: &BezPath, grid: f64) -> BezPath {
             .map(|el| match *el {
                 PathEl::MoveTo(p) => PathEl::MoveTo(snap(p)),
                 PathEl::LineTo(p) => PathEl::LineTo(snap(p)),
-                PathEl::CurveTo(a, b, p) => {
-                    PathEl::CurveTo(a, b, snap(p))
-                }
+                PathEl::CurveTo(a, b, p) => PathEl::CurveTo(a, b, snap(p)),
                 PathEl::QuadTo(a, p) => PathEl::QuadTo(a, snap(p)),
                 PathEl::ClosePath => PathEl::ClosePath,
             })
@@ -59,23 +54,28 @@ pub fn hv_handles(path: &BezPath, threshold_deg: f64) -> BezPath {
     BezPath::from_vec(elements)
 }
 
-
-/// Snap a handle to exact H/V if it's close enough.
+/// Snap a handle to exact H/V if its angle from the anchor is close enough.
+///
+/// Computes the absolute angle of the handle-anchor vector. If the angle
+/// is within `threshold` radians of 0 or 180 deg (horizontal), the handle's
+/// y-coordinate is set to the anchor's y. If within `threshold` of 90 deg
+/// (vertical), the handle's x is set to the anchor's x.
 fn snap_handle(handle: Point, anchor: Point, threshold: f64) -> Point {
     let dx = handle.x - anchor.x;
     let dy = handle.y - anchor.y;
     if dx * dx + dy * dy < 1e-12 {
-        return handle;
+        return handle; // coincident — nothing to snap
     }
 
-    let angle = dy.atan2(dx).abs(); // 0..PI
+    let angle = dy.atan2(dx).abs(); // range: 0..PI
 
+    // Near horizontal (0 deg or 180 deg): lock y to anchor.
     if angle < threshold || (PI - angle) < threshold {
         return Point::new(handle.x, anchor.y);
     }
+    // Near vertical (90 deg): lock x to anchor.
     if (angle - FRAC_PI_2).abs() < threshold {
         return Point::new(anchor.x, handle.y);
     }
     handle
 }
-

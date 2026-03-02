@@ -3,7 +3,7 @@
 //! Ensures outer contours wind CCW and counters (holes) wind CW,
 //! which is the standard convention for TrueType/OpenType fonts.
 
-use kurbo::{BezPath, PathEl, Point, flatten};
+use kurbo::{flatten, BezPath, PathEl, Point};
 
 use crate::geom::signed_area;
 
@@ -106,11 +106,9 @@ fn reverse_path(path: &BezPath) -> BezPath {
 /// polygon that faithfully follows the actual curve.
 fn flatten_to_polygon(path: &BezPath, tolerance: f64) -> Vec<Point> {
     let mut points = Vec::new();
-    flatten(path.elements().iter().copied(), tolerance, |el| {
-        match el {
-            PathEl::MoveTo(p) | PathEl::LineTo(p) => points.push(p),
-            _ => {}
-        }
+    flatten(path.elements().iter().copied(), tolerance, |el| match el {
+        PathEl::MoveTo(p) | PathEl::LineTo(p) => points.push(p),
+        _ => {}
     });
     points
 }
@@ -144,6 +142,11 @@ fn point_in_polygon(point: Point, polygon: &[Point]) -> bool {
     inside
 }
 
+/// A path segment's type and control points (used for path reversal).
+///
+/// When reversing a path, line segments simply swap endpoints. Cubic
+/// curves swap endpoints and reverse their control point order (c1↔c2).
+/// Quadratic curves swap endpoints; the single control point stays.
 #[derive(Clone, Copy)]
 enum Seg {
     Line,

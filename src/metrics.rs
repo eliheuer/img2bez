@@ -37,7 +37,10 @@ pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> (Vec<BezPath>, (f64
         dx = (dx / g).round() * g;
         dy = (dy / g).round() * g;
     }
-    (paths.iter().map(|path| translate(path, dx, dy)).collect(), (dx, dy))
+    (
+        paths.iter().map(|path| translate(path, dx, dy)).collect(),
+        (dx, dy),
+    )
 }
 
 /// Compute advance width from bounding box + right sidebearing.
@@ -53,6 +56,7 @@ pub fn advance_from_bounds(paths: &[BezPath], rsb: f64) -> f64 {
     }
 }
 
+/// Translate all points in a BezPath by (dx, dy).
 fn translate(path: &BezPath, dx: f64, dy: f64) -> BezPath {
     let mut translated = path.clone();
     translated.apply_affine(Affine::translate(Vec2::new(dx, dy)));

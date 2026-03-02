@@ -82,10 +82,17 @@ pub fn to_contour(path: &BezPath) -> Result<Contour, TraceError> {
     // returns to start), remove it — UFO contours are cyclic and the
     // first point implicitly closes the loop.
     let last_oncurve = points.iter().rposition(|p| {
-        matches!(p.typ, PointType::Curve | PointType::Line | PointType::QCurve)
+        matches!(
+            p.typ,
+            PointType::Curve | PointType::Line | PointType::QCurve
+        )
     });
     if let Some(idx) = last_oncurve {
         let last = &points[idx];
+        // Tolerance for detecting duplicate closing points. 0.5 font units
+        // accounts for grid-snapping rounding (grid=2 → max rounding = 1.0,
+        // but the closing point and MoveTo are snapped independently so
+        // they may differ by up to 1 unit; 0.5 is conservative).
         let eps = 0.5;
         if (last.x - first.x).abs() < eps && (last.y - first.y).abs() < eps {
             points.remove(idx);
@@ -118,7 +125,10 @@ fn compute_smooth(points: &mut [ContourPoint]) {
     }
 
     for i in 0..n {
-        if !matches!(points[i].typ, PointType::Curve | PointType::QCurve | PointType::Line) {
+        if !matches!(
+            points[i].typ,
+            PointType::Curve | PointType::QCurve | PointType::Line
+        ) {
             continue;
         }
 
@@ -142,13 +152,11 @@ fn compute_smooth(points: &mut [ContourPoint]) {
         // Cross product of unit tangent vectors.
         // Smooth if |cross| < sin(10°) ≈ 0.174, meaning tangents
         // are within ~10° of being collinear.
-        let cross = (in_dx / in_len) * (out_dy / out_len)
-            - (in_dy / in_len) * (out_dx / out_len);
+        let cross = (in_dx / in_len) * (out_dy / out_len) - (in_dy / in_len) * (out_dx / out_len);
 
         // Also check they point the same direction (dot > 0),
         // not opposite (which would be a cusp, not smooth).
-        let dot = (in_dx / in_len) * (out_dx / out_len)
-            + (in_dy / in_len) * (out_dy / out_len);
+        let dot = (in_dx / in_len) * (out_dx / out_len) + (in_dy / in_len) * (out_dy / out_len);
 
         if cross.abs() < 0.174 && dot > 0.0 {
             points[i].smooth = true;

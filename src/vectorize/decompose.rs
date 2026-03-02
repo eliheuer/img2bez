@@ -124,34 +124,55 @@ fn find_path(bm: &Bitmap, x0: i32, y0: i32, sign: i8) -> PixelPath {
     loop {
         points.push((x, y));
 
-        // c = pixel to the right of the path direction
-        // d = pixel to the left (should be foreground for normal traversal)
-        let c = bm.get(
-            x + (dx + dy - 1) / 2,
-            y + (dy - dx - 1) / 2,
-        );
-        let d = bm.get(
-            x + (dx - dy - 1) / 2,
-            y + (dy + dx - 1) / 2,
-        );
+        // Pixel offset formulas for the dual grid.
+        //
+        // The path walks on pixel corners. At each corner (x, y) with
+        // direction (dx, dy), we check the two pixels that share the
+        // edge we're about to cross:
+        //
+        //   c = pixel to the RIGHT of the path direction
+        //   d = pixel to the LEFT  (should be foreground for normal traversal)
+        //
+        // The formula `(dx + dy - 1) / 2` (integer division) maps each
+        // cardinal direction to the correct pixel offset:
+        //
+        //   dir (dx,dy)  │ c_offset_x=(dx+dy-1)/2  c_offset_y=(dy-dx-1)/2
+        //   ─────────────┼─────────────────────────────────────────────────
+        //   Up    (0, 1) │  0                       -1
+        //   Down  (0,-1) │ -1                        0
+        //   Right (1, 0) │  0                        0
+        //   Left  (-1,0) │ -1                       -1
+        //
+        //   dir (dx,dy)  │ d_offset_x=(dx-dy-1)/2  d_offset_y=(dy+dx-1)/2
+        //   ─────────────┼─────────────────────────────────────────────────
+        //   Up    (0, 1) │ -1                        0
+        //   Down  (0,-1) │  0                       -1
+        //   Right (1, 0) │  0                        0  (same row)
+        //   Left  (-1,0) │ -1                       -1
+        let c = bm.get(x + (dx + dy - 1) / 2, y + (dy - dx - 1) / 2);
+        let d = bm.get(x + (dx - dy - 1) / 2, y + (dy + dx - 1) / 2);
 
+        // Turn policy decision tree:
+        //
+        //   c  d  │ action
+        //   ──────┼─────────────────────────────────────
+        //   1  0  │ Ambiguous (diagonal crossing): turn RIGHT
+        //   1  1  │ Both set: turn LEFT (keep foreground on left)
+        //   0  0  │ Both unset: turn RIGHT (find foreground)
+        //   0  1  │ Normal: go STRAIGHT (foreground on left, bg on right)
         if c && !d {
-            // Ambiguous: right turn policy (works well for geometric shapes)
             let tmp = dx;
             dx = -dy;
             dy = tmp;
         } else if c {
-            // Both set → turn left
             let tmp = dx;
             dx = dy;
             dy = -tmp;
         } else if !d {
-            // Both unset → turn right
             let tmp = dx;
             dx = -dy;
             dy = tmp;
         }
-        // else: go straight (!c && d = foreground on left, bg on right)
 
         x += dx;
         y += dy;
@@ -197,8 +218,7 @@ fn path_area(points: &[(i32, i32)]) -> f64 {
     let mut area: i64 = 0;
     for i in 0..n {
         let j = (i + 1) % n;
-        area += points[i].0 as i64 * points[j].1 as i64
-            - points[j].0 as i64 * points[i].1 as i64;
+        area += points[i].0 as i64 * points[j].1 as i64 - points[j].0 as i64 * points[i].1 as i64;
     }
     area as f64 / 2.0
 }

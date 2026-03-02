@@ -25,8 +25,14 @@ pub fn load_and_threshold(path: &Path, config: &TracingConfig) -> Result<GrayIma
         }
     };
 
-    let mut binary =
-        imageproc::contrast::threshold(&img, threshold, imageproc::contrast::ThresholdType::BinaryInverted);
+    // BinaryInverted: pixels BELOW the threshold become 255 (foreground).
+    // This matches the convention that dark pixels in scanned glyph images
+    // are the glyph body (foreground) and light pixels are background.
+    let mut binary = imageproc::contrast::threshold(
+        &img,
+        threshold,
+        imageproc::contrast::ThresholdType::BinaryInverted,
+    );
 
     if config.invert {
         for pixel in binary.pixels_mut() {
