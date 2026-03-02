@@ -103,12 +103,14 @@ pub fn to_contour(path: &BezPath) -> Result<Contour, TraceError> {
     Ok(Contour::new(points, None))
 }
 
-/// Set smooth=true on curve/qcurve points where tangent is continuous.
+/// Set smooth=true on on-curve points where tangent is continuous.
 ///
-/// For each on-curve point, check if the incoming control direction
-/// (from previous off-curve or on-curve) and outgoing control direction
-/// (toward next off-curve or on-curve) are collinear. Only collinear
-/// tangents get smooth=true; tangent discontinuities are corners.
+/// For each on-curve point (curve, qcurve, or line), check if the
+/// incoming and outgoing tangent directions are collinear. Only
+/// collinear tangents get smooth=true; tangent discontinuities are
+/// corners. Line points are included so that line→curve junctions
+/// with collinear handles (e.g. a vertical stem flowing into a curve
+/// with a vertical first handle) are correctly marked smooth.
 fn compute_smooth(points: &mut [ContourPoint]) {
     let n = points.len();
     if n < 3 {
@@ -116,7 +118,7 @@ fn compute_smooth(points: &mut [ContourPoint]) {
     }
 
     for i in 0..n {
-        if !matches!(points[i].typ, PointType::Curve | PointType::QCurve) {
+        if !matches!(points[i].typ, PointType::Curve | PointType::QCurve | PointType::Line) {
             continue;
         }
 

@@ -189,7 +189,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // Merge only non-corner transitions that are at the same vertex.
     base_splits = merge_nearby_preserve_corners(base_splits, 1, m, &corner_set);
 
-    let split_points = if base_splits.is_empty() {
+    let mut split_points = if base_splits.is_empty() {
         // No corners or transitions: use global bounding-box extrema.
         find_contour_extrema(v)
     } else {
@@ -296,7 +296,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
 
     // Two-pass fitting: first classify all sections, then fit curves
     // with tangent constraints from adjacent line sections.
-    let num_splits = split_points.len();
+    let mut num_splits = split_points.len();
 
     // Pass 1: classify each section as line or curve.
     struct SectionInfo {
@@ -323,7 +323,14 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             let p0 = smoothed[0];
             let pn = *smoothed.last().unwrap();
             let seg_len = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
-            let line_tol = (seg_len * 0.02).max(3.0);
+            // For short sections (< 100 polygon units), use a more
+            // permissive absolute tolerance. Bitmap tracing creates small
+            // curved artifacts at junctions that should be straight lines.
+            let line_tol = if seg_len < 100.0 {
+                (seg_len * 0.25).max(3.0)
+            } else {
+                (seg_len * 0.02).max(3.0)
+            };
             let is_line = max_dev <= line_tol;
             if debug_splits {
                 eprintln!("  Section[{}] ({:.1},{:.1})->({:.1},{:.1}) len={:.1} pts={} dev={:.2} tol={:.2} => {}",
@@ -335,6 +342,108 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
                 smoothed,
             });
         }
+    }
+
+    // Pass 1.5: Split long CURVE sections containing a straight prefix or suffix.
+    //
+    // With high alphamax (e.g. 1.0), corner detection may miss stem-to-bowl
+    // junctions, creating a single huge section (>300 units) that includes
+    // both a straight stem and a curved bowl. A single cubic can't represent
+    // both, so detect the straight portion and split it off as a LINE.
+    {
+        let min_section_chord = 500.0_f64;
+        let min_straight_chord = 200.0_f64;
+        let straight_tol = 3.0_f64;
+        let min_curve_pts: usize = 4;
+
+        // Collect (section_index, smoothed_split_index, is_prefix).
+        let mut split_actions: Vec<(usize, usize, bool)> = Vec::new();
+
+        for si in 0..sections.len() {
+            if sections[si].is_line { continue; }
+            let sm = &sections[si].smoothed;
+            let n = sm.len();
+            if n < min_curve_pts + 3 { continue; }
+
+            let p0 = sm[0];
+            let pn = sm[n - 1];
+            let chord = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
+            if chord < min_section_chord { continue; }
+
+            // Check straight prefix: walk from start, find longest collinear run.
+            // Back off by 1 vertex so the curve fitter has room to shape
+            // a smooth transition at the line→curve junction.
+            let mut prefix_end = 0usize;
+            for k in 2..n {
+                if collinear_deviation(&sm[0..=k]) > straight_tol { break; }
+                prefix_end = k;
+            }
+            if prefix_end > 2 { prefix_end -= 1; }
+            if prefix_end >= 2 {
+                let pk = sm[prefix_end];
+                let prefix_chord = ((pk.0 - p0.0).powi(2) + (pk.1 - p0.1).powi(2)).sqrt();
+                if prefix_chord >= min_straight_chord && n - prefix_end >= min_curve_pts {
+                    if debug_splits {
+                        eprintln!("  Pass 1.5: Section[{}] splitting straight prefix at smoothed[{}], prefix_chord={:.1}",
+                            si, prefix_end, prefix_chord);
+                    }
+                    split_actions.push((si, prefix_end, true));
+                    continue;
+                }
+            }
+
+            // Check straight suffix: walk from end, find longest collinear run.
+            // Back off by 1 vertex for smooth transition.
+            let mut suffix_start = n - 1;
+            for k in (0..n - 2).rev() {
+                if collinear_deviation(&sm[k..]) > straight_tol { break; }
+                suffix_start = k;
+            }
+            if suffix_start < n - 3 { suffix_start += 1; }
+            if suffix_start <= n - 3 {
+                let pk = sm[suffix_start];
+                let suffix_chord = ((pn.0 - pk.0).powi(2) + (pn.1 - pk.1).powi(2)).sqrt();
+                if suffix_chord >= min_straight_chord && suffix_start >= min_curve_pts {
+                    if debug_splits {
+                        eprintln!("  Pass 1.5: Section[{}] splitting straight suffix at smoothed[{}], suffix_chord={:.1}",
+                            si, suffix_start, suffix_chord);
+                    }
+                    split_actions.push((si, suffix_start, false));
+                }
+            }
+        }
+
+        // Apply splits in reverse order so indices remain valid.
+        for &(si, k, is_prefix) in split_actions.iter().rev() {
+            let old_smoothed = std::mem::take(&mut sections[si].smoothed);
+            let poly_start = split_points[si];
+            let new_vertex = (poly_start + k) % m;
+
+            if is_prefix {
+                // [0..=k] is LINE, [k..] is CURVE
+                sections[si] = SectionInfo {
+                    is_line: true,
+                    smoothed: old_smoothed[0..=k].to_vec(),
+                };
+                sections.insert(si + 1, SectionInfo {
+                    is_line: false,
+                    smoothed: old_smoothed[k..].to_vec(),
+                });
+                split_points.insert(si + 1, new_vertex);
+            } else {
+                // [0..=k] is CURVE, [k..] is LINE
+                sections[si] = SectionInfo {
+                    is_line: false,
+                    smoothed: old_smoothed[0..=k].to_vec(),
+                };
+                sections.insert(si + 1, SectionInfo {
+                    is_line: true,
+                    smoothed: old_smoothed[k..].to_vec(),
+                });
+                split_points.insert(si + 1, new_vertex);
+            }
+        }
+        num_splits = split_points.len();
     }
 
     // Pass 2: emit path elements.
@@ -500,13 +609,69 @@ fn fit_single_cubic(
         }
     }
 
-    let cp1 = Point::new(p0.x + u0.x * chord * best_sa, p0.y + u0.y * chord * best_sa);
-    let cp2 = Point::new(p3.x - u1.x * chord * best_sb, p3.y - u1.y * chord * best_sb);
+    let mut cp1 = Point::new(p0.x + u0.x * chord * best_sa, p0.y + u0.y * chord * best_sa);
+    let mut cp2 = Point::new(p3.x - u1.x * chord * best_sb, p3.y - u1.y * chord * best_sb);
+
+    // Magic triangle check: handles must not cross each other's extension
+    // lines. The triangle is formed by p0, p3, and the intersection of
+    // the two handle directions. Each handle must stay on its side.
+    // Clamp handle lengths so they don't extend past the intersection point.
+    clamp_to_magic_triangle(p0, &mut cp1, &mut cp2, p3);
 
     let mut path = BezPath::new();
     path.move_to(p0);
     path.curve_to(cp1, cp2, p3);
     path
+}
+
+/// Clamp control points so they stay within the magic triangle.
+///
+/// The magic triangle is formed by the two on-curve points and the
+/// intersection of the two handle direction lines. Each handle must
+/// not extend past this intersection point (measured along its own
+/// direction). If a handle overshoots, it is shortened to 95% of the
+/// distance to the intersection.
+fn clamp_to_magic_triangle(p0: Point, cp1: &mut Point, cp2: &mut Point, p3: Point) {
+    let u0 = Point::new(cp1.x - p0.x, cp1.y - p0.y);
+    let u1 = Point::new(cp2.x - p3.x, cp2.y - p3.y);
+
+    let len0 = (u0.x * u0.x + u0.y * u0.y).sqrt();
+    let len1 = (u1.x * u1.x + u1.y * u1.y).sqrt();
+    if len0 < 1e-10 || len1 < 1e-10 {
+        return;
+    }
+
+    // Find intersection of the two handle rays using parametric form:
+    // p0 + t * u0 = p3 + s * u1
+    // Solve for t: cross(u0, u1) * t = cross(p3-p0, u1)
+    let cross_uv = u0.x * u1.y - u0.y * u1.x;
+    if cross_uv.abs() < 1e-10 {
+        return; // parallel handles, no triangle
+    }
+
+    let dp = Point::new(p3.x - p0.x, p3.y - p0.y);
+    let t = (dp.x * u1.y - dp.y * u1.x) / cross_uv;
+    let s = (dp.x * u0.y - dp.y * u0.x) / cross_uv;
+
+    // t is the parameter for ray from p0 along u0.
+    // s is the parameter for ray from p3 along u1.
+    // Both must be positive for a valid triangle.
+    // Handle extends from 0 to 1 in its parameter (len0/len1 normalized).
+    // If t < 1 (handle overshoots intersection), clamp to 95% of t.
+    if t > 0.0 {
+        let max_len = t * len0 * 0.95;
+        if len0 > max_len {
+            let scale = max_len / len0;
+            *cp1 = Point::new(p0.x + u0.x * scale, p0.y + u0.y * scale);
+        }
+    }
+    if s > 0.0 {
+        let max_len = s * len1 * 0.95;
+        if len1 > max_len {
+            let scale = max_len / len1;
+            *cp2 = Point::new(p3.x + u1.x * scale, p3.y + u1.y * scale);
+        }
+    }
 }
 
 /// Maximum geometric distance from interior polyline points to the cubic curve.
@@ -750,6 +915,172 @@ fn snap_and_merge_lines(path: &mut BezPath) {
     }
 
     *path = out;
+}
+
+/// DEAD CODE — kept for reference but not called.
+/// Extract near-straight H/V prefixes from cubic curves as line segments.
+/// Disabled: splitting cubics degrades H/V handle alignment and IoU.
+#[allow(dead_code)]
+fn extract_hv_stems(path: &mut BezPath) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let els = path.elements().to_vec();
+    let mut out: Vec<PathEl> = Vec::new();
+    let hv_threshold = 10.0_f64.to_radians();
+    let min_line_len = 30.0;
+    let max_deviation = 2.0; // max perpendicular distance from H/V line
+
+    let mut cursor = Point::ZERO;
+    let mut prev_is_hv_line = false;
+    let mut prev_line_dir: Option<(f64, f64)> = None; // unit direction of prev line
+
+    for &el in &els {
+        match el {
+            PathEl::MoveTo(p) => {
+                cursor = p;
+                prev_is_hv_line = false;
+                prev_line_dir = None;
+                out.push(el);
+            }
+            PathEl::LineTo(p) => {
+                let dx = p.x - cursor.x;
+                let dy = p.y - cursor.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                let angle = dy.atan2(dx).abs();
+                let is_hv = angle < hv_threshold
+                    || (PI - angle) < hv_threshold
+                    || (angle - FRAC_PI_2).abs() < hv_threshold;
+                prev_is_hv_line = is_hv && len > 20.0;
+                prev_line_dir = if len > 1e-10 { Some((dx/len, dy/len)) } else { None };
+                cursor = p;
+                out.push(el);
+            }
+            PathEl::CurveTo(c1, c2, p3) => {
+                let p0 = cursor;
+
+                // Check if first handle direction is H/V.
+                let h_dx = c1.x - p0.x;
+                let h_dy = c1.y - p0.y;
+                let h_len = (h_dx * h_dx + h_dy * h_dy).sqrt();
+                let h_angle = h_dy.atan2(h_dx).abs();
+                let handle_is_hv = h_len > 1e-10
+                    && (h_angle < hv_threshold
+                        || (PI - h_angle) < hv_threshold
+                        || (h_angle - FRAC_PI_2).abs() < hv_threshold);
+
+                // Check if handle direction matches previous line direction.
+                let dir_matches = if let Some((pdx, pdy)) = prev_line_dir {
+                    if h_len > 1e-10 {
+                        let dot = (h_dx/h_len)*pdx + (h_dy/h_len)*pdy;
+                        dot.abs() > 0.94 // within ~20°
+                    } else { false }
+                } else { false };
+
+                if prev_is_hv_line && handle_is_hv && dir_matches {
+                    // Find the t value where the curve first deviates from
+                    // the handle direction by more than max_deviation.
+                    let h_unit = if h_len > 1e-10 {
+                        (h_dx / h_len, h_dy / h_len)
+                    } else { (0.0, 0.0) };
+
+                    // Sample the cubic at fine t intervals.
+                    let mut best_t = 0.0;
+                    let steps = 100;
+                    for i in 1..=steps {
+                        let t = i as f64 / steps as f64;
+                        let pt = eval_cubic(p0, c1, c2, p3, t);
+                        // Perpendicular distance from the H/V line through p0.
+                        let dx = pt.x - p0.x;
+                        let dy = pt.y - p0.y;
+                        let perp = (dx * h_unit.1 - dy * h_unit.0).abs();
+                        if perp > max_deviation {
+                            break;
+                        }
+                        // Also check the line length along the direction.
+                        let along = dx * h_unit.0 + dy * h_unit.1;
+                        if along > 0.0 {
+                            best_t = t;
+                        }
+                    }
+
+                    // Check if the extracted line is long enough.
+                    if best_t > 0.01 {
+                        let split_pt = eval_cubic(p0, c1, c2, p3, best_t);
+                        let line_dx = split_pt.x - p0.x;
+                        let line_dy = split_pt.y - p0.y;
+                        let line_len = (line_dx*line_dx + line_dy*line_dy).sqrt();
+
+                        if line_len >= min_line_len {
+                            // de Casteljau split at best_t.
+                            let (_, c2_right, c1_right, p3_right) =
+                                de_casteljau_split(p0, c1, c2, p3, best_t);
+
+                            // Snap the split point to H/V from p0.
+                            let snapped_split = if (split_pt.x - p0.x).abs() < max_deviation {
+                                Point::new(p0.x, split_pt.y) // vertical
+                            } else if (split_pt.y - p0.y).abs() < max_deviation {
+                                Point::new(split_pt.x, p0.y) // horizontal
+                            } else {
+                                split_pt
+                            };
+
+                            out.push(PathEl::LineTo(snapped_split));
+                            out.push(PathEl::CurveTo(c1_right, c2_right, p3_right));
+                            cursor = p3;
+                            prev_is_hv_line = false;
+                            prev_line_dir = None;
+                            continue;
+                        }
+                    }
+                }
+
+                // No split — emit as-is.
+                cursor = p3;
+                prev_is_hv_line = false;
+                prev_line_dir = None;
+                out.push(el);
+            }
+            other => {
+                prev_is_hv_line = false;
+                prev_line_dir = None;
+                out.push(other);
+            }
+        }
+    }
+
+    *path = BezPath::from_vec(out);
+}
+
+#[allow(dead_code)]
+fn eval_cubic(p0: Point, p1: Point, p2: Point, p3: Point, t: f64) -> Point {
+    let mt = 1.0 - t;
+    let mt2 = mt * mt;
+    let t2 = t * t;
+    Point::new(
+        mt2 * mt * p0.x + 3.0 * mt2 * t * p1.x + 3.0 * mt * t2 * p2.x + t2 * t * p3.x,
+        mt2 * mt * p0.y + 3.0 * mt2 * t * p1.y + 3.0 * mt * t2 * p2.y + t2 * t * p3.y,
+    )
+}
+
+#[allow(dead_code)]
+fn de_casteljau_split(
+    p0: Point, p1: Point, p2: Point, p3: Point, t: f64,
+) -> (Point, Point, Point, Point) {
+    // Level 1
+    let q0 = Point::new(p0.x + t*(p1.x-p0.x), p0.y + t*(p1.y-p0.y));
+    let q1 = Point::new(p1.x + t*(p2.x-p1.x), p1.y + t*(p2.y-p1.y));
+    let q2 = Point::new(p2.x + t*(p3.x-p2.x), p2.y + t*(p3.y-p2.y));
+    // Level 2
+    let r0 = Point::new(q0.x + t*(q1.x-q0.x), q0.y + t*(q1.y-q0.y));
+    let r1 = Point::new(q1.x + t*(q2.x-q1.x), q1.y + t*(q2.y-q1.y));
+    // Right sub-curve: control points are (split_pt, r1, q2, p3)
+    // where split_pt = eval_cubic(t)
+    // Return: (split_pt, r1, q2, p3) but we reorganize for the caller
+    // Caller needs: (split_pt, c2_right=r1, c1_right_unused, p3_right=p3)
+    // Actually: right sub-curve is (split_pt, r1, q2, p3)
+    // So CurveTo(r1, q2, p3) starting from split_pt
+    let _split = Point::new(r0.x + t*(r1.x-r0.x), r0.y + t*(r1.y-r0.y));
+    // Return (split_pt, c1_right, c2_right, p3)
+    (_split, r1, q2, p3)
 }
 
 /// Get the cursor position before element at index `i`.
