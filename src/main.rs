@@ -116,10 +116,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     eprintln!("  \u{2713} {}", cli.output.display());
 
-    // Optional reference comparison (geometric metrics)
+    // Optional reference comparison
     if let Some(ref_path) = &cli.reference {
         let traced = img2bez::eval::from_trace_result(&result);
         let reference = img2bez::eval::load_glif(ref_path)?;
+
+        // Raster comparison (primary metric: visual similarity)
+        let output_dir = cli.output.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let raster = img2bez::render::raster_compare(
+            &traced.paths, &reference.paths, output_dir, &cli.name,
+        )?;
+        eprintln!();
+        eprintln!("  Raster IoU  {:.1}%  (overlap={} traced={} ref={})",
+            raster.iou * 100.0, raster.overlap_px, raster.traced_px, raster.ref_px);
+        eprintln!("  Diff        {}", raster.diff_path.display());
+
+        // Geometric metrics (secondary)
         let report = img2bez::eval::evaluate(&traced, &reference, cli.grid, &ref_path.display().to_string());
         eprint!("{}", report);
     }

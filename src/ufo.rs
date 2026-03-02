@@ -52,11 +52,12 @@ pub fn to_contour(path: &BezPath) -> Result<Contour, TraceError> {
             PathEl::CurveTo(a, b, p) => {
                 points.push(contour_point(a, PointType::OffCurve, false));
                 points.push(contour_point(b, PointType::OffCurve, false));
-                points.push(contour_point(p, PointType::Curve, true));
+                // smooth is computed below after all points are collected.
+                points.push(contour_point(p, PointType::Curve, false));
             }
             PathEl::QuadTo(a, p) => {
                 points.push(contour_point(a, PointType::OffCurve, false));
-                points.push(contour_point(p, PointType::QCurve, true));
+                points.push(contour_point(p, PointType::QCurve, false));
             }
             PathEl::ClosePath => {}
             PathEl::MoveTo(_) => {
@@ -83,23 +84,74 @@ pub fn to_contour(path: &BezPath) -> Result<Contour, TraceError> {
     let last_oncurve = points.iter().rposition(|p| {
         matches!(p.typ, PointType::Curve | PointType::Line | PointType::QCurve)
     });
-    let closing_smooth = if let Some(idx) = last_oncurve {
+    if let Some(idx) = last_oncurve {
         let last = &points[idx];
         let eps = 0.5;
         if (last.x - first.x).abs() < eps && (last.y - first.y).abs() < eps {
-            let smooth = last.smooth;
             points.remove(idx);
-            smooth
-        } else {
-            false
         }
-    } else {
-        false
-    };
+    }
 
-    points.insert(0, contour_point(first, closing_type, closing_smooth));
+    points.insert(0, contour_point(first, closing_type, false));
+
+    // Compute smooth attribute: a curve/qcurve point is smooth only
+    // if the incoming and outgoing tangent directions are collinear.
+    // Per type design convention, smooth means the off-curve handles
+    // on both sides and the on-curve point form a straight line.
+    compute_smooth(&mut points);
 
     Ok(Contour::new(points, None))
+}
+
+/// Set smooth=true on curve/qcurve points where tangent is continuous.
+///
+/// For each on-curve point, check if the incoming control direction
+/// (from previous off-curve or on-curve) and outgoing control direction
+/// (toward next off-curve or on-curve) are collinear. Only collinear
+/// tangents get smooth=true; tangent discontinuities are corners.
+fn compute_smooth(points: &mut [ContourPoint]) {
+    let n = points.len();
+    if n < 3 {
+        return;
+    }
+
+    for i in 0..n {
+        if !matches!(points[i].typ, PointType::Curve | PointType::QCurve) {
+            continue;
+        }
+
+        // Incoming tangent: from previous point toward this point.
+        let prev = if i == 0 { n - 1 } else { i - 1 };
+        let in_dx = points[i].x - points[prev].x;
+        let in_dy = points[i].y - points[prev].y;
+
+        // Outgoing tangent: from this point toward next point.
+        let next = (i + 1) % n;
+        let out_dx = points[next].x - points[i].x;
+        let out_dy = points[next].y - points[i].y;
+
+        let in_len = (in_dx * in_dx + in_dy * in_dy).sqrt();
+        let out_len = (out_dx * out_dx + out_dy * out_dy).sqrt();
+
+        if in_len < 0.01 || out_len < 0.01 {
+            continue; // degenerate, leave as corner
+        }
+
+        // Cross product of unit tangent vectors.
+        // Smooth if |cross| < sin(10°) ≈ 0.174, meaning tangents
+        // are within ~10° of being collinear.
+        let cross = (in_dx / in_len) * (out_dy / out_len)
+            - (in_dy / in_len) * (out_dx / out_len);
+
+        // Also check they point the same direction (dot > 0),
+        // not opposite (which would be a cusp, not smooth).
+        let dot = (in_dx / in_len) * (out_dx / out_len)
+            + (in_dy / in_len) * (out_dy / out_len);
+
+        if cross.abs() < 0.174 && dot > 0.0 {
+            points[i].smooth = true;
+        }
+    }
 }
 
 fn contour_point(p: kurbo::Point, typ: PointType, smooth: bool) -> ContourPoint {

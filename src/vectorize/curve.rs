@@ -294,49 +294,64 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
         return fit_smooth_closed(&smoothed, params.accuracy);
     }
 
+    // Two-pass fitting: first classify all sections, then fit curves
+    // with tangent constraints from adjacent line sections.
+    let num_splits = split_points.len();
+
+    // Pass 1: classify each section as line or curve.
+    struct SectionInfo {
+        is_line: bool,
+        smoothed: Vec<(f64, f64)>,
+    }
+
+    let mut sections: Vec<SectionInfo> = Vec::with_capacity(num_splits);
+    let debug_splits = std::env::var("IMG2BEZ_DEBUG_SPLITS").is_ok();
+
+    for si in 0..num_splits {
+        let start = split_points[si];
+        let end = split_points[(si + 1) % num_splits];
+        let segment = extract_cyclic(v, start, end, m);
+
+        if segment.len() <= 2 {
+            sections.push(SectionInfo {
+                is_line: true,
+                smoothed: segment,
+            });
+        } else {
+            let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
+            let max_dev = collinear_deviation(&smoothed);
+            let p0 = smoothed[0];
+            let pn = *smoothed.last().unwrap();
+            let seg_len = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
+            let line_tol = (seg_len * 0.02).max(3.0);
+            let is_line = max_dev <= line_tol;
+            if debug_splits {
+                eprintln!("  Section[{}] ({:.1},{:.1})->({:.1},{:.1}) len={:.1} pts={} dev={:.2} tol={:.2} => {}",
+                    si, p0.0, p0.1, pn.0, pn.1, seg_len, segment.len(), max_dev, line_tol,
+                    if is_line { "LINE" } else { "CURVE" });
+            }
+            sections.push(SectionInfo {
+                is_line,
+                smoothed,
+            });
+        }
+    }
+
+    // Pass 2: emit path elements.
     let mut path = BezPath::new();
     let first = v[split_points[0]];
     path.move_to(Point::new(first.0, first.1));
 
-    let num_splits = split_points.len();
     for si in 0..num_splits {
-        let start = split_points[si];
-        let end = split_points[(si + 1) % num_splits];
+        let end_idx = split_points[(si + 1) % num_splits];
 
-        // Extract the vertices between these two split points (inclusive).
-        let segment = extract_cyclic(v, start, end, m);
-
-        if segment.len() <= 2 {
-            let p = v[end];
+        if sections[si].is_line {
+            let p = v[end_idx];
             path.line_to(Point::new(p.0, p.1));
         } else {
-            // Smooth first, then decide: line or curve.
-            let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
-            let max_dev = collinear_deviation(&smoothed);
-            // Relative threshold: a long segment (stem, crossbar) tolerates
-            // more absolute deviation than a short one. Minimum 3 pixels.
-            let p0 = smoothed[0];
-            let pn = smoothed[smoothed.len() - 1];
-            let seg_len = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
-            let line_tol = (seg_len * 0.02).max(3.0);
-            if std::env::var("IMG2BEZ_DEBUG_SPLITS").is_ok() {
-                eprintln!("  Section[{}] ({:.1},{:.1})->({:.1},{:.1}) len={:.1} pts={} dev={:.2} tol={:.2} => {}",
-                    si, p0.0, p0.1, pn.0, pn.1, seg_len, segment.len(), max_dev, line_tol,
-                    if max_dev <= line_tol { "LINE" } else { "CURVE" });
-            }
-            if max_dev <= line_tol {
-                // Straight section (stem, crossbar, etc.)
-                let p = v[end];
-                path.line_to(Point::new(p.0, p.1));
-            } else {
-                // Fit a single cubic using the grid search fitter.
-                // The grid search optimizes handle lengths to minimize
-                // Hausdorff distance to the polyline, using H/V-snapped
-                // tangent directions from the smoothed polygon endpoints.
-                let cubic = fit_single_cubic(&smoothed);
-                for el in cubic.elements().iter().skip(1) {
-                    path.push(*el);
-                }
+            let cubic = fit_single_cubic(&sections[si].smoothed, None, None);
+            for el in cubic.elements().iter().skip(1) {
+                path.push(*el);
             }
         }
     }
@@ -367,7 +382,15 @@ fn fit_smooth_closed(vertices: &[(f64, f64)], accuracy: f64) -> BezPath {
 /// quarter-curve that should always be exactly one cubic Bezier.
 /// Handle directions come from the polygon tangent at each endpoint;
 /// handle lengths are optimized to minimize distance to the polyline.
-fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
+///
+/// Optional tangent overrides (`t0_override`, `t1_override`) constrain
+/// the start/end handle direction to match an adjacent line section,
+/// ensuring G1 continuity at curve-to-line junctions.
+fn fit_single_cubic(
+    points: &[(f64, f64)],
+    t0_override: Option<Point>,
+    t1_override: Option<Point>,
+) -> BezPath {
     let n = points.len();
     let p0 = Point::new(points[0].0, points[0].1);
     let p3 = Point::new(points[n - 1].0, points[n - 1].1);
@@ -379,36 +402,43 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
         return path;
     }
 
-    // Tangent at start/end: use a wider window (up to 1/3 of the section)
-    // for more stable direction estimation. Looking at just the nearest
-    // neighbor gives noisy tangents; averaging over a few points better
-    // reflects the curve's overall direction, making H/V snapping more
-    // effective per type-design convention.
-    let k = ((n / 3).max(1)).min(5);
-    let t0 = Point::new(
-        points[k].0 - points[0].0,
-        points[k].1 - points[0].1,
-    );
-    let t1 = Point::new(
-        points[n - 1].0 - points[n - 1 - k].0,
-        points[n - 1].1 - points[n - 1 - k].1,
-    );
-
-    let t0_len = (t0.x * t0.x + t0.y * t0.y).sqrt();
-    let t1_len = (t1.x * t1.x + t1.y * t1.y).sqrt();
-
-    if t0_len < 1e-10 || t1_len < 1e-10 {
-        let mut path = BezPath::new();
-        path.move_to(p0);
-        path.line_to(p3);
-        return path;
-    }
-
-    // Unit tangents, snapped to H/V when close.
-    // Per type-design convention (ohnotype.co/blog/drawing-vectors),
-    // handles at extrema should be H/V.
-    let u0 = snap_tangent_hv(Point::new(t0.x / t0_len, t0.y / t0_len));
-    let u1 = snap_tangent_hv(Point::new(t1.x / t1_len, t1.y / t1_len));
+    // Tangent at start/end: use override from adjacent line if available,
+    // otherwise estimate from polygon points using a wider window (up to
+    // 1/3 of the section) for stable direction estimation.
+    let u0 = if let Some(dir) = t0_override {
+        snap_tangent_hv(dir)
+    } else {
+        let k = ((n / 3).max(1)).min(5);
+        let t0 = Point::new(
+            points[k].0 - points[0].0,
+            points[k].1 - points[0].1,
+        );
+        let t0_len = (t0.x * t0.x + t0.y * t0.y).sqrt();
+        if t0_len < 1e-10 {
+            let mut path = BezPath::new();
+            path.move_to(p0);
+            path.line_to(p3);
+            return path;
+        }
+        snap_tangent_hv(Point::new(t0.x / t0_len, t0.y / t0_len))
+    };
+    let u1 = if let Some(dir) = t1_override {
+        snap_tangent_hv(dir)
+    } else {
+        let k = ((n / 3).max(1)).min(5);
+        let t1 = Point::new(
+            points[n - 1].0 - points[n - 1 - k].0,
+            points[n - 1].1 - points[n - 1 - k].1,
+        );
+        let t1_len = (t1.x * t1.x + t1.y * t1.y).sqrt();
+        if t1_len < 1e-10 {
+            let mut path = BezPath::new();
+            path.move_to(p0);
+            path.line_to(p3);
+            return path;
+        }
+        snap_tangent_hv(Point::new(t1.x / t1_len, t1.y / t1_len))
+    };
 
     // Optimize handle lengths to best fit the interior polyline points.
     // Test asymmetric (a, b) combinations — curve sections are often

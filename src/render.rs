@@ -301,3 +301,139 @@ pub fn render_comparison(
 
     Ok(())
 }
+
+/// Result of raster-based comparison between traced and reference outlines.
+pub struct RasterCompare {
+    /// Intersection over union of filled regions (0.0–1.0).
+    pub iou: f64,
+    /// Pixels filled in traced output.
+    pub traced_px: u64,
+    /// Pixels filled in reference.
+    pub ref_px: u64,
+    /// Pixels filled in both.
+    pub overlap_px: u64,
+    /// Path to the saved diff image.
+    pub diff_path: std::path::PathBuf,
+}
+
+/// Render both traced and reference BezPaths and compare pixel-by-pixel.
+///
+/// Both are rendered filled black at the same scale, aligned by bounding
+/// box center. Returns IoU and saves a diff image:
+///   green = both filled, red = traced only, blue = reference only.
+pub fn raster_compare(
+    traced_paths: &[BezPath],
+    reference_paths: &[BezPath],
+    output_dir: &Path,
+    glyph_name: &str,
+) -> Result<RasterCompare, std::io::Error> {
+    use kurbo::Shape;
+
+    let canvas_size: u32 = 600;
+    let padding: f64 = 20.0;
+
+    // Union bounding box of both path sets.
+    let t_bbox = traced_paths.iter()
+        .map(|p| p.bounding_box())
+        .reduce(|a, b| a.union(b));
+    let r_bbox = reference_paths.iter()
+        .map(|p| p.bounding_box())
+        .reduce(|a, b| a.union(b));
+
+    let (t_bbox, r_bbox) = match (t_bbox, r_bbox) {
+        (Some(t), Some(r)) => (t, r),
+        _ => {
+            let diff_path = output_dir.join(format!("{}_raster_diff.png", glyph_name));
+            return Ok(RasterCompare { iou: 0.0, traced_px: 0, ref_px: 0, overlap_px: 0, diff_path });
+        }
+    };
+
+    // Align by bounding box center: translate traced to match reference center.
+    let t_cx = t_bbox.x0 + t_bbox.width() / 2.0;
+    let t_cy = t_bbox.y0 + t_bbox.height() / 2.0;
+    let r_cx = r_bbox.x0 + r_bbox.width() / 2.0;
+    let r_cy = r_bbox.y0 + r_bbox.height() / 2.0;
+    let dx = r_cx - t_cx;
+    let dy = r_cy - t_cy;
+
+    // Use reference bbox (plus padding) as the viewport since
+    // traced is translated to align with reference.
+    let view_bbox = r_bbox;
+    let content = canvas_size as f64 - padding * 2.0;
+    let scale = content / view_bbox.width().max(view_bbox.height());
+
+    // Reference transform: font coords → canvas coords (Y-flipped).
+    let ref_tx = padding - view_bbox.x0 * scale;
+    let ref_ty = padding + (view_bbox.y0 + view_bbox.height()) * scale;
+    let ref_transform = tiny_skia::Transform {
+        sx: scale as f32,
+        kx: 0.0,
+        ky: 0.0,
+        sy: -(scale as f32),
+        tx: ref_tx as f32,
+        ty: ref_ty as f32,
+    };
+
+    // Traced transform: same as reference but with center-alignment offset.
+    let traced_transform = tiny_skia::Transform {
+        sx: scale as f32,
+        kx: 0.0,
+        ky: 0.0,
+        sy: -(scale as f32),
+        tx: (ref_tx + dx * scale) as f32,
+        ty: (ref_ty - dy * scale) as f32,
+    };
+
+    // Render traced (center-aligned to reference).
+    let mut traced_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).unwrap();
+    traced_pm.fill(tiny_skia::Color::WHITE);
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(tiny_skia::Color::BLACK);
+    paint.anti_alias = false; // crisp comparison
+
+    let mut combined_traced = BezPath::new();
+    for p in traced_paths { for el in p.elements() { combined_traced.push(*el); } }
+    if let Some(sk) = kurbo_to_tinyskia(&combined_traced, traced_transform) {
+        traced_pm.fill_path(&sk, &paint, tiny_skia::FillRule::EvenOdd, tiny_skia::Transform::identity(), None);
+    }
+
+    // Render reference.
+    let mut ref_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).unwrap();
+    ref_pm.fill(tiny_skia::Color::WHITE);
+    let mut combined_ref = BezPath::new();
+    for p in reference_paths { for el in p.elements() { combined_ref.push(*el); } }
+    if let Some(sk) = kurbo_to_tinyskia(&combined_ref, ref_transform) {
+        ref_pm.fill_path(&sk, &paint, tiny_skia::FillRule::EvenOdd, tiny_skia::Transform::identity(), None);
+    }
+
+    // Compare pixels.
+    let total = (canvas_size * canvas_size) as usize;
+    let mut overlap: u64 = 0;
+    let mut traced_only: u64 = 0;
+    let mut ref_only: u64 = 0;
+
+    let mut diff_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).unwrap();
+    diff_pm.fill(tiny_skia::Color::from_rgba8(32, 32, 32, 255));
+
+    for i in 0..total {
+        let t_black = traced_pm.pixels()[i].red() < 128;
+        let r_black = ref_pm.pixels()[i].red() < 128;
+        let color = match (t_black, r_black) {
+            (true, true)   => { overlap += 1; tiny_skia::PremultipliedColorU8::from_rgba(0, 180, 0, 255).unwrap() }
+            (true, false)  => { traced_only += 1; tiny_skia::PremultipliedColorU8::from_rgba(220, 60, 60, 255).unwrap() }
+            (false, true)  => { ref_only += 1; tiny_skia::PremultipliedColorU8::from_rgba(60, 60, 220, 255).unwrap() }
+            (false, false) => continue,
+        };
+        diff_pm.pixels_mut()[i] = color;
+    }
+
+    let traced_px = overlap + traced_only;
+    let ref_px = overlap + ref_only;
+    let union_px = traced_px + ref_only;
+    let iou = if union_px > 0 { overlap as f64 / union_px as f64 } else { 1.0 };
+
+    let diff_path = output_dir.join(format!("{}_raster_diff.png", glyph_name));
+    std::fs::write(&diff_path, encode_png(&diff_pm))?;
+
+    Ok(RasterCompare { iou, traced_px, ref_px, overlap_px: overlap, diff_path })
+}
