@@ -230,7 +230,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             .copied()
             .chain(extrema_set.iter().copied())
             .collect();
-        let min_section_len: f64 = 50.0;
+        let min_section_len: f64 = 90.0;
         loop {
             let ns = pts.len();
             if ns < 3 { break; }
@@ -344,105 +344,166 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
         }
     }
 
-    // Pass 1.5: Split long CURVE sections containing a straight prefix or suffix.
+    // Pass 1.5: Split long CURVE sections containing a straight run.
     //
-    // With high alphamax (e.g. 1.0), corner detection may miss stem-to-bowl
-    // junctions, creating a single huge section (>300 units) that includes
-    // both a straight stem and a curved bowl. A single cubic can't represent
-    // both, so detect the straight portion and split it off as a LINE.
+    // With high alphamax (e.g. 1.0) or after short-section removal,
+    // a single huge section may include both straight and curved portions
+    // that a single cubic can't represent. Find the longest straight run
+    // anywhere in the section (prefix, suffix, or internal) and split
+    // it off as a LINE — potentially creating up to 3 sub-sections.
     {
         let min_section_chord = 500.0_f64;
         let min_straight_chord = 200.0_f64;
         let straight_tol = 3.0_f64;
         let min_curve_pts: usize = 4;
 
-        // Collect (section_index, smoothed_split_index, is_prefix).
-        let mut split_actions: Vec<(usize, usize, bool)> = Vec::new();
+        let mut new_sections: Vec<SectionInfo> = Vec::new();
+        let mut new_split_points: Vec<usize> = Vec::new();
 
         for si in 0..sections.len() {
-            if sections[si].is_line { continue; }
+            if sections[si].is_line {
+                new_split_points.push(split_points[si]);
+                new_sections.push(SectionInfo {
+                    is_line: true,
+                    smoothed: std::mem::take(&mut sections[si].smoothed),
+                });
+                continue;
+            }
+
             let sm = &sections[si].smoothed;
             let n = sm.len();
-            if n < min_curve_pts + 3 { continue; }
-
             let p0 = sm[0];
             let pn = sm[n - 1];
             let chord = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
-            if chord < min_section_chord { continue; }
 
-            // Check straight prefix: walk from start, find longest collinear run.
-            // Back off by 1 vertex so the curve fitter has room to shape
-            // a smooth transition at the line→curve junction.
-            let mut prefix_end = 0usize;
-            for k in 2..n {
-                if collinear_deviation(&sm[0..=k]) > straight_tol { break; }
-                prefix_end = k;
+            if chord < min_section_chord || n < min_curve_pts + 4 {
+                new_split_points.push(split_points[si]);
+                new_sections.push(SectionInfo {
+                    is_line: false,
+                    smoothed: std::mem::take(&mut sections[si].smoothed),
+                });
+                continue;
             }
-            if prefix_end > 2 { prefix_end -= 1; }
-            if prefix_end >= 2 {
-                let pk = sm[prefix_end];
-                let prefix_chord = ((pk.0 - p0.0).powi(2) + (pk.1 - p0.1).powi(2)).sqrt();
-                if prefix_chord >= min_straight_chord && n - prefix_end >= min_curve_pts {
-                    if debug_splits {
-                        eprintln!("  Pass 1.5: Section[{}] splitting straight prefix at smoothed[{}], prefix_chord={:.1}",
-                            si, prefix_end, prefix_chord);
+
+            // Find the longest straight run anywhere in the section.
+            let mut best_start = 0usize;
+            let mut best_end = 0usize;
+            let mut best_chord = 0.0_f64;
+
+            for i in 0..n.saturating_sub(2) {
+                let mut end = i + 2;
+                while end < n && collinear_deviation(&sm[i..=end]) <= straight_tol {
+                    end += 1;
+                }
+                let actual_end = end - 1;
+                if actual_end > i + 1 {
+                    let c = ((sm[actual_end].0 - sm[i].0).powi(2)
+                           + (sm[actual_end].1 - sm[i].1).powi(2)).sqrt();
+                    if c > best_chord {
+                        best_chord = c;
+                        best_start = i;
+                        best_end = actual_end;
                     }
-                    split_actions.push((si, prefix_end, true));
-                    continue;
                 }
             }
 
-            // Check straight suffix: walk from end, find longest collinear run.
-            // Back off by 1 vertex for smooth transition.
-            let mut suffix_start = n - 1;
-            for k in (0..n - 2).rev() {
-                if collinear_deviation(&sm[k..]) > straight_tol { break; }
-                suffix_start = k;
+            if best_chord < min_straight_chord {
+                new_split_points.push(split_points[si]);
+                new_sections.push(SectionInfo {
+                    is_line: false,
+                    smoothed: std::mem::take(&mut sections[si].smoothed),
+                });
+                continue;
             }
-            if suffix_start < n - 3 { suffix_start += 1; }
-            if suffix_start <= n - 3 {
-                let pk = sm[suffix_start];
-                let suffix_chord = ((pn.0 - pk.0).powi(2) + (pn.1 - pk.1).powi(2)).sqrt();
-                if suffix_chord >= min_straight_chord && suffix_start >= min_curve_pts {
-                    if debug_splits {
-                        eprintln!("  Pass 1.5: Section[{}] splitting straight suffix at smoothed[{}], suffix_chord={:.1}",
-                            si, suffix_start, suffix_chord);
-                    }
-                    split_actions.push((si, suffix_start, false));
-                }
-            }
-        }
 
-        // Apply splits in reverse order so indices remain valid.
-        for &(si, k, is_prefix) in split_actions.iter().rev() {
-            let old_smoothed = std::mem::take(&mut sections[si].smoothed);
+            // Back off by 1 vertex from each end that borders a curve
+            // so the curve fitter has room for a smooth transition.
+            let adj_start = if best_start > 0 { best_start + 1 } else { best_start };
+            let adj_end = if best_end < n - 1 { best_end - 1 } else { best_end };
+
+            // Re-check chord after back-off
+            let adj_chord = ((sm[adj_end].0 - sm[adj_start].0).powi(2)
+                           + (sm[adj_end].1 - sm[adj_start].1).powi(2)).sqrt();
+            if adj_chord < min_straight_chord {
+                new_split_points.push(split_points[si]);
+                new_sections.push(SectionInfo {
+                    is_line: false,
+                    smoothed: std::mem::take(&mut sections[si].smoothed),
+                });
+                continue;
+            }
+
             let poly_start = split_points[si];
-            let new_vertex = (poly_start + k) % m;
+            let old_smoothed = std::mem::take(&mut sections[si].smoothed);
 
-            if is_prefix {
-                // [0..=k] is LINE, [k..] is CURVE
-                sections[si] = SectionInfo {
-                    is_line: true,
-                    smoothed: old_smoothed[0..=k].to_vec(),
-                };
-                sections.insert(si + 1, SectionInfo {
-                    is_line: false,
-                    smoothed: old_smoothed[k..].to_vec(),
-                });
-                split_points.insert(si + 1, new_vertex);
+            if debug_splits {
+                eprintln!("  Pass 1.5: Section[{}] straight run at smoothed[{}..{}], chord={:.1}",
+                    si, adj_start, adj_end, adj_chord);
+            }
+
+            if adj_start <= 1 {
+                // Prefix: LINE then CURVE
+                if n - adj_end >= min_curve_pts {
+                    new_split_points.push(poly_start);
+                    new_sections.push(SectionInfo {
+                        is_line: true,
+                        smoothed: old_smoothed[0..=adj_end].to_vec(),
+                    });
+                    new_split_points.push((poly_start + adj_end) % m);
+                    new_sections.push(SectionInfo {
+                        is_line: false,
+                        smoothed: old_smoothed[adj_end..].to_vec(),
+                    });
+                } else {
+                    new_split_points.push(poly_start);
+                    new_sections.push(SectionInfo { is_line: false, smoothed: old_smoothed });
+                }
+            } else if adj_end >= n - 2 {
+                // Suffix: CURVE then LINE
+                if adj_start + 1 >= min_curve_pts {
+                    new_split_points.push(poly_start);
+                    new_sections.push(SectionInfo {
+                        is_line: false,
+                        smoothed: old_smoothed[0..=adj_start].to_vec(),
+                    });
+                    new_split_points.push((poly_start + adj_start) % m);
+                    new_sections.push(SectionInfo {
+                        is_line: true,
+                        smoothed: old_smoothed[adj_start..].to_vec(),
+                    });
+                } else {
+                    new_split_points.push(poly_start);
+                    new_sections.push(SectionInfo { is_line: false, smoothed: old_smoothed });
+                }
             } else {
-                // [0..=k] is CURVE, [k..] is LINE
-                sections[si] = SectionInfo {
-                    is_line: false,
-                    smoothed: old_smoothed[0..=k].to_vec(),
-                };
-                sections.insert(si + 1, SectionInfo {
-                    is_line: true,
-                    smoothed: old_smoothed[k..].to_vec(),
-                });
-                split_points.insert(si + 1, new_vertex);
+                // Internal: CURVE + LINE + CURVE
+                let first_ok = adj_start + 1 >= min_curve_pts;
+                let last_ok = n - adj_end >= min_curve_pts;
+                if first_ok && last_ok {
+                    new_split_points.push(poly_start);
+                    new_sections.push(SectionInfo {
+                        is_line: false,
+                        smoothed: old_smoothed[0..=adj_start].to_vec(),
+                    });
+                    new_split_points.push((poly_start + adj_start) % m);
+                    new_sections.push(SectionInfo {
+                        is_line: true,
+                        smoothed: old_smoothed[adj_start..=adj_end].to_vec(),
+                    });
+                    new_split_points.push((poly_start + adj_end) % m);
+                    new_sections.push(SectionInfo {
+                        is_line: false,
+                        smoothed: old_smoothed[adj_end..].to_vec(),
+                    });
+                } else {
+                    new_split_points.push(poly_start);
+                    new_sections.push(SectionInfo { is_line: false, smoothed: old_smoothed });
+                }
             }
         }
+
+        sections = new_sections;
+        split_points = new_split_points;
         num_splits = split_points.len();
     }
 
