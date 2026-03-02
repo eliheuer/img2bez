@@ -7,8 +7,7 @@
 
 mod chamfer;
 mod direction;
-mod extrema;
-mod simplify;
+mod harmonize;
 mod snap;
 
 use kurbo::BezPath;
@@ -43,6 +42,15 @@ pub fn process(paths: &[BezPath], config: &TracingConfig) -> Vec<BezPath> {
     result = result
         .iter()
         .map(|p| snap::hv_lines(p, hv_line_tol))
+        .collect();
+
+    // G2 curvature harmonization: adjust handle lengths at smooth joins
+    // so curvature matches on both sides, eliminating visible kinks.
+    // Runs BEFORE H/V snap since it adjusts handle lengths (not directions).
+    let harm_grid = if config.grid > 0 { config.grid as f64 } else { 0.0 };
+    result = result
+        .iter()
+        .map(|p| harmonize::harmonize(p, 1, harm_grid))
         .collect();
 
     // One pass of H/V handle snapping catches grid-snap residuals.

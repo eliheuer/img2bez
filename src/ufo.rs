@@ -77,7 +77,27 @@ pub fn to_contour(path: &BezPath) -> Result<Contour, TraceError> {
         })
         .unwrap_or(PointType::Line);
 
-    points.insert(0, contour_point(first, closing_type, false));
+    // If the last on-curve point duplicates the MoveTo (closing segment
+    // returns to start), remove it — UFO contours are cyclic and the
+    // first point implicitly closes the loop.
+    let last_oncurve = points.iter().rposition(|p| {
+        matches!(p.typ, PointType::Curve | PointType::Line | PointType::QCurve)
+    });
+    let closing_smooth = if let Some(idx) = last_oncurve {
+        let last = &points[idx];
+        let eps = 0.5;
+        if (last.x - first.x).abs() < eps && (last.y - first.y).abs() < eps {
+            let smooth = last.smooth;
+            points.remove(idx);
+            smooth
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    points.insert(0, contour_point(first, closing_type, closing_smooth));
 
     Ok(Contour::new(points, None))
 }

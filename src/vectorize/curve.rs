@@ -5,7 +5,9 @@
 //! through each short section. Because sections run extrema-to-extrema,
 //! handles naturally align H/V and point counts stay minimal.
 
-use kurbo::{fit_to_bezpath_opt, simplify::SimplifyBezPath, BezPath, PathEl, Point};
+use kurbo::{
+    fit_to_bezpath_opt, simplify::SimplifyBezPath, BezPath, PathEl, Point,
+};
 
 use super::polygon::Polygon;
 
@@ -170,7 +172,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // Find curvature transitions: where the polygon changes from
     // straight (alpha ≈ 0) to curved or vice versa. These are
     // the natural split points at stem/crossbar boundaries.
-    let transitions = find_curvature_transitions(&alphas, 0.3);
+    let transitions = find_curvature_transitions(&alphas, 0.37);
 
     // Build split points: corners + ALL transitions.
     // Corners and transitions serve different structural purposes:
@@ -193,6 +195,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     } else {
         // Per-segment: find extrema only in curved sections (not straight).
         let mut pts = base_splits.clone();
+        let mut extrema_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let ns = base_splits.len();
         for si in 0..ns {
             let start = base_splits[si];
@@ -206,12 +209,55 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
                 let slen = ((sn.0 - s0.0).powi(2) + (sn.1 - s0.1).powi(2)).sqrt();
                 let tol = (slen * 0.02).max(3.0);
                 if dev > tol {
-                    pts.extend(find_segment_extrema(v, start, end, m));
+                    let seg_ext = find_segment_extrema(v, start, end, m);
+                    for &e in &seg_ext {
+                        extrema_set.insert(e);
+                    }
+                    pts.extend(seg_ext);
                 }
             }
         }
         pts.sort_unstable();
         pts.dedup();
+
+        // Remove transitions that create very short sections.
+        // When a curvature transition fires close to a corner, the tiny
+        // section between them adds an unnecessary on-curve point. The
+        // corner already marks the structural boundary; the transition
+        // is redundant and creates a no-man's-land mini-segment.
+        // Only transitions (not corners or extrema) can be removed.
+        let keep_set: std::collections::HashSet<usize> = corner_set.iter()
+            .copied()
+            .chain(extrema_set.iter().copied())
+            .collect();
+        let min_section_len: f64 = 50.0;
+        loop {
+            let ns = pts.len();
+            if ns < 3 { break; }
+            let mut to_remove = None;
+            for si in 0..ns {
+                let start = pts[si];
+                let end = pts[(si + 1) % ns];
+                let dist = ((v[end].0 - v[start].0).powi(2)
+                    + (v[end].1 - v[start].1).powi(2))
+                .sqrt();
+                if dist < min_section_len {
+                    // Prefer removing the endpoint that is a transition
+                    if !keep_set.contains(&end) {
+                        to_remove = Some((si + 1) % ns);
+                        break;
+                    } else if !keep_set.contains(&start) {
+                        to_remove = Some(si);
+                        break;
+                    }
+                }
+            }
+            match to_remove {
+                Some(idx) => { pts.remove(idx); }
+                None => break,
+            }
+        }
+
         pts
     };
 
@@ -283,10 +329,12 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
                 let p = v[end];
                 path.line_to(Point::new(p.0, p.1));
             } else {
-                // One cubic per section — keeps points at extrema
-                // with H/V handles per type design convention.
-                let fitted = fit_single_cubic(&smoothed);
-                for el in fitted.elements().iter().skip(1) {
+                // Fit a single cubic using the grid search fitter.
+                // The grid search optimizes handle lengths to minimize
+                // Hausdorff distance to the polyline, using H/V-snapped
+                // tangent directions from the smoothed polygon endpoints.
+                let cubic = fit_single_cubic(&smoothed);
+                for el in cubic.elements().iter().skip(1) {
                     path.push(*el);
                 }
             }
@@ -365,12 +413,14 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
     // Optimize handle lengths to best fit the interior polyline points.
     // Test asymmetric (a, b) combinations — curve sections are often
     // asymmetric (e.g., a quarter-circle starting from a tangent line).
+    // Two-pass: coarse 5×5 grid, then fine refinement around the winner.
     let chord = ((p3.x - p0.x).powi(2) + (p3.y - p0.y).powi(2)).sqrt();
-    let mut best_a = chord / 3.0;
-    let mut best_b = chord / 3.0;
+    let mut best_sa = 0.33_f64;
+    let mut best_sb = 0.33_f64;
     let mut best_err = f64::MAX;
 
-    let scales: &[f64] = &[0.20, 0.27, 0.33, 0.40, 0.50];
+    // Coarse grid search
+    let scales: &[f64] = &[0.15, 0.22, 0.29, 0.36, 0.43, 0.50, 0.57];
     for &sa in scales {
         for &sb in scales {
             let a = chord * sa;
@@ -380,14 +430,40 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
             let err = max_polyline_deviation(p0, p1, p2, p3, points);
             if err < best_err {
                 best_err = err;
-                best_a = a;
-                best_b = b;
+                best_sa = sa;
+                best_sb = sb;
             }
         }
     }
 
-    let cp1 = Point::new(p0.x + u0.x * best_a, p0.y + u0.y * best_a);
-    let cp2 = Point::new(p3.x - u1.x * best_b, p3.y - u1.y * best_b);
+    // Two-pass refinement: medium (step 0.01, ±0.05), then fine (step 0.003, ±0.01)
+    for &(step, range) in &[(0.01, 0.05), (0.003, 0.01)] {
+        let sa_lo = (best_sa - range).max(0.05);
+        let sa_hi = best_sa + range;
+        let sb_lo = (best_sb - range).max(0.05);
+        let sb_hi = best_sb + range;
+        let mut sa = sa_lo;
+        while sa <= sa_hi + 1e-9 {
+            let mut sb = sb_lo;
+            while sb <= sb_hi + 1e-9 {
+                let a = chord * sa;
+                let b = chord * sb;
+                let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
+                let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
+                let err = max_polyline_deviation(p0, p1, p2, p3, points);
+                if err < best_err {
+                    best_err = err;
+                    best_sa = sa;
+                    best_sb = sb;
+                }
+                sb += step;
+            }
+            sa += step;
+        }
+    }
+
+    let cp1 = Point::new(p0.x + u0.x * chord * best_sa, p0.y + u0.y * chord * best_sa);
+    let cp2 = Point::new(p3.x - u1.x * chord * best_sb, p3.y - u1.y * chord * best_sb);
 
     let mut path = BezPath::new();
     path.move_to(p0);
@@ -395,7 +471,9 @@ fn fit_single_cubic(points: &[(f64, f64)]) -> BezPath {
     path
 }
 
-/// Maximum deviation between a cubic and a polyline, sampled at polyline points.
+/// Maximum geometric distance from interior polyline points to the cubic curve.
+/// Uses nearest-point (one-sided Hausdorff) rather than parametric correspondence,
+/// which gives more accurate error measurement for handle optimization.
 fn max_polyline_deviation(
     p0: Point, p1: Point, p2: Point, p3: Point,
     polyline: &[(f64, f64)],
@@ -404,23 +482,38 @@ fn max_polyline_deviation(
     if n <= 2 {
         return 0.0;
     }
+
+    // Sample the cubic densely.
+    const NUM_SAMPLES: usize = 48;
+    let mut samples = [(0.0_f64, 0.0_f64); NUM_SAMPLES + 1];
+    for i in 0..=NUM_SAMPLES {
+        let t = i as f64 / NUM_SAMPLES as f64;
+        let mt = 1.0 - t;
+        samples[i] = (
+            mt * mt * mt * p0.x
+                + 3.0 * mt * mt * t * p1.x
+                + 3.0 * mt * t * t * p2.x
+                + t * t * t * p3.x,
+            mt * mt * mt * p0.y
+                + 3.0 * mt * mt * t * p1.y
+                + 3.0 * mt * t * t * p2.y
+                + t * t * t * p3.y,
+        );
+    }
+
+    // For each interior polyline point, find minimum distance to any curve sample.
     let mut max_d = 0.0_f64;
     for i in 1..n - 1 {
-        // Approximate parameter t by arc-length fraction.
-        let t = i as f64 / (n - 1) as f64;
-        let mt = 1.0 - t;
-        // De Casteljau evaluation.
-        let bx = mt * mt * mt * p0.x
-            + 3.0 * mt * mt * t * p1.x
-            + 3.0 * mt * t * t * p2.x
-            + t * t * t * p3.x;
-        let by = mt * mt * mt * p0.y
-            + 3.0 * mt * mt * t * p1.y
-            + 3.0 * mt * t * t * p2.y
-            + t * t * t * p3.y;
-        let dx = bx - polyline[i].0;
-        let dy = by - polyline[i].1;
-        max_d = max_d.max((dx * dx + dy * dy).sqrt());
+        let px = polyline[i].0;
+        let py = polyline[i].1;
+        let mut min_d_sq = f64::MAX;
+        for &(cx, cy) in &samples {
+            let d_sq = (cx - px) * (cx - px) + (cy - py) * (cy - py);
+            if d_sq < min_d_sq {
+                min_d_sq = d_sq;
+            }
+        }
+        max_d = max_d.max(min_d_sq.sqrt());
     }
     max_d
 }
@@ -606,7 +699,6 @@ fn snap_and_merge_lines(path: &mut BezPath) {
                     }
                 }
                 out.push(PathEl::LineTo(end));
-                cursor = end;
             }
             PathEl::MoveTo(p) => {
                 out.push(PathEl::MoveTo(p));
