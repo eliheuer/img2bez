@@ -441,18 +441,24 @@ fn fit_single_cubic(
     };
 
     // Optimize handle lengths to best fit the interior polyline points.
-    // Test asymmetric (a, b) combinations — curve sections are often
-    // asymmetric (e.g., a quarter-circle starting from a tangent line).
-    // Two-pass: coarse 5×5 grid, then fine refinement around the winner.
+    // Grid search over asymmetric (sa, sb) scale factors, then multi-pass
+    // refinement. Minimizes max nearest-point distance (Hausdorff).
+    // Hard constraint: handles must be within MAX_HANDLE_RATIO of each other.
     let chord = ((p3.x - p0.x).powi(2) + (p3.y - p0.y).powi(2)).sqrt();
     let mut best_sa = 0.33_f64;
     let mut best_sb = 0.33_f64;
     let mut best_err = f64::MAX;
 
-    // Coarse grid search
-    let scales: &[f64] = &[0.15, 0.22, 0.29, 0.36, 0.43, 0.50, 0.57];
+    const MAX_HANDLE_RATIO: f64 = 1.5;
+    let ratio_ok = |sa: f64, sb: f64| -> bool {
+        sa.max(sb) / sa.min(sb) <= MAX_HANDLE_RATIO
+    };
+
+    // Coarse grid: 9 values from 0.10 to 0.70
+    let scales: &[f64] = &[0.10, 0.175, 0.25, 0.325, 0.40, 0.475, 0.55, 0.625, 0.70];
     for &sa in scales {
         for &sb in scales {
+            if !ratio_ok(sa, sb) { continue; }
             let a = chord * sa;
             let b = chord * sb;
             let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
@@ -466,25 +472,27 @@ fn fit_single_cubic(
         }
     }
 
-    // Two-pass refinement: medium (step 0.01, ±0.05), then fine (step 0.003, ±0.01)
-    for &(step, range) in &[(0.01, 0.05), (0.003, 0.01)] {
+    // Three-pass refinement: medium → fine → ultra-fine
+    for &(step, range) in &[(0.008, 0.05), (0.002, 0.012), (0.0005, 0.003)] {
         let sa_lo = (best_sa - range).max(0.05);
-        let sa_hi = best_sa + range;
+        let sa_hi = (best_sa + range).min(0.80);
         let sb_lo = (best_sb - range).max(0.05);
-        let sb_hi = best_sb + range;
+        let sb_hi = (best_sb + range).min(0.80);
         let mut sa = sa_lo;
         while sa <= sa_hi + 1e-9 {
             let mut sb = sb_lo;
             while sb <= sb_hi + 1e-9 {
-                let a = chord * sa;
-                let b = chord * sb;
-                let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
-                let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
-                let err = max_polyline_deviation(p0, p1, p2, p3, points);
-                if err < best_err {
-                    best_err = err;
-                    best_sa = sa;
-                    best_sb = sb;
+                if ratio_ok(sa, sb) {
+                    let a = chord * sa;
+                    let b = chord * sb;
+                    let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
+                    let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
+                    let err = max_polyline_deviation(p0, p1, p2, p3, points);
+                    if err < best_err {
+                        best_err = err;
+                        best_sa = sa;
+                        best_sb = sb;
+                    }
                 }
                 sb += step;
             }
@@ -514,7 +522,7 @@ fn max_polyline_deviation(
     }
 
     // Sample the cubic densely.
-    const NUM_SAMPLES: usize = 48;
+    const NUM_SAMPLES: usize = 96;
     let mut samples = [(0.0_f64, 0.0_f64); NUM_SAMPLES + 1];
     for i in 0..=NUM_SAMPLES {
         let t = i as f64 / NUM_SAMPLES as f64;
@@ -732,11 +740,9 @@ fn snap_and_merge_lines(path: &mut BezPath) {
             }
             PathEl::MoveTo(p) => {
                 out.push(PathEl::MoveTo(p));
-                cursor = p;
             }
             PathEl::CurveTo(c1, c2, p) => {
                 out.push(PathEl::CurveTo(c1, c2, p));
-                cursor = p;
             }
             other => out.push(other),
         }

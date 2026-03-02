@@ -8,6 +8,10 @@ use std::f64::consts::{FRAC_PI_2, PI};
 use kurbo::{BezPath, PathEl, Point};
 
 /// Snap all coordinates to a grid.
+///
+/// On-curve points (MoveTo, LineTo, and the endpoint of CurveTo/QuadTo)
+/// are snapped to the grid. Off-curve control points are NOT snapped,
+/// preserving curve shape accuracy while keeping on-curve points on-grid.
 pub fn to_grid(path: &BezPath, grid: f64) -> BezPath {
     let snap = |p: Point| -> Point {
         Point::new(
@@ -22,9 +26,9 @@ pub fn to_grid(path: &BezPath, grid: f64) -> BezPath {
                 PathEl::MoveTo(p) => PathEl::MoveTo(snap(p)),
                 PathEl::LineTo(p) => PathEl::LineTo(snap(p)),
                 PathEl::CurveTo(a, b, p) => {
-                    PathEl::CurveTo(snap(a), snap(b), snap(p))
+                    PathEl::CurveTo(a, b, snap(p))
                 }
-                PathEl::QuadTo(a, p) => PathEl::QuadTo(snap(a), snap(p)),
+                PathEl::QuadTo(a, p) => PathEl::QuadTo(a, snap(p)),
                 PathEl::ClosePath => PathEl::ClosePath,
             })
             .collect(),
@@ -55,53 +59,6 @@ pub fn hv_handles(path: &BezPath, threshold_deg: f64) -> BezPath {
     BezPath::from_vec(elements)
 }
 
-/// Snap nearly-horizontal/vertical line and curve endpoints to exact H/V.
-///
-/// For each segment, if the endpoint is within `threshold` font units of
-/// being horizontally or vertically aligned with the previous on-curve point,
-/// snap it to exact alignment.
-pub fn hv_lines(path: &BezPath, threshold: f64) -> BezPath {
-    let mut elements: Vec<PathEl> = path.elements().to_vec();
-    let mut prev = Point::ZERO;
-
-    for el in &mut elements {
-        match el {
-            PathEl::MoveTo(p) => {
-                prev = *p;
-            }
-            PathEl::LineTo(p) => {
-                if (p.y - prev.y).abs() <= threshold {
-                    p.y = prev.y;
-                }
-                if (p.x - prev.x).abs() <= threshold {
-                    p.x = prev.x;
-                }
-                prev = *p;
-            }
-            PathEl::CurveTo(_c1, _c2, p) => {
-                if (p.y - prev.y).abs() <= threshold {
-                    p.y = prev.y;
-                }
-                if (p.x - prev.x).abs() <= threshold {
-                    p.x = prev.x;
-                }
-                prev = *p;
-            }
-            PathEl::QuadTo(_, p) => {
-                if (p.y - prev.y).abs() <= threshold {
-                    p.y = prev.y;
-                }
-                if (p.x - prev.x).abs() <= threshold {
-                    p.x = prev.x;
-                }
-                prev = *p;
-            }
-            PathEl::ClosePath => {}
-        }
-    }
-
-    BezPath::from_vec(elements)
-}
 
 /// Snap a handle to exact H/V if it's close enough.
 fn snap_handle(handle: Point, anchor: Point, threshold: f64) -> Point {
