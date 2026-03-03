@@ -1,34 +1,47 @@
 # img2bez
 
-Bitmap image to font-ready bezier contours — Rust library and CLI tool.
+Trace bitmap glyph images to bezier contours and insert them directly into UFO font sources.
 
-Traces scanned or rendered glyph images into clean cubic bezier paths suitable for font editors (RoboFont, Glyphs, FontForge) and font compilation pipelines (fontc, fontmake). Outputs directly into UFO sources.
+Designed for agentic AI type design pipelines — takes scanned or rendered letterforms and produces cubic outlines ready for editing or compilation into fonts.
+
+Built on the [Linebender](https://linebender.org) ecosystem: [kurbo](https://crates.io/crates/kurbo) for bezier curve math and optimal curve fitting via [`fit_to_bezpath_opt`](https://docs.rs/kurbo/latest/kurbo/fn.fit_to_bezpath_opt.html), and [norad](https://crates.io/crates/norad) for UFO reading/writing.
 
 ## Installation
 
 ```bash
-cargo install --path .
+cargo install --git https://github.com/eliheuer/img2bez
 ```
 
 Or to use as a library, add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-img2bez = { path = "../img2bez" }
+img2bez = { git = "https://github.com/eliheuer/img2bez" }
 ```
 
 ## Quick start
 
 ```bash
-# Trace a glyph image into a UFO
-img2bez -i glyph.png -o MyFont.ufo -n A -u 0041
+# Basic usage: trace a glyph image and insert it into a UFO source
+img2bez --input glyph.png \
+  --output MyFont.ufo \    # target UFO (must already exist)
+  --name A \                # glyph name in the UFO
+  --unicode 0041            # Unicode codepoint in hex
 
-# With font metrics (ascender 832, descender -256 = height 1088)
-img2bez -i glyph.png -o MyFont.ufo -n A -u 0041 \
-  --target-height 1088 --y-offset -256 --grid 2
+# With font metrics: scale and position the outline to match your UPM
+img2bez --input glyph.png \
+  --output MyFont.ufo \
+  --name A \
+  --unicode 0041 \
+  --target-height 1088 \    # ascender - descender in font units (832 + 256)
+  --y-offset -256 \         # shift down by the descender value
+  --grid 2                  # snap coordinates to a 2-unit grid
 
-# Compare against a hand-drawn reference
-img2bez -i glyph.png -o MyFont.ufo -n A -u 0041 \
+# Compare the traced output against a hand-drawn reference glyph
+img2bez --input glyph.png \
+  --output MyFont.ufo \
+  --name A \
+  --unicode 0041 \
   --reference MyFont.ufo/glyphs/A_.glif
 ```
 
@@ -114,7 +127,11 @@ let result = trace(Path::new("glyph.png"), &config)?;
 
 ## Debug environment variables
 
-Set any of these to enable debug output:
+Prefix your command with `VAR=1` to enable debug output for a single run:
+
+```bash
+IMG2BEZ_DEBUG_SPLITS=1 img2bez --input glyph.png --output MyFont.ufo --name A
+```
 
 | Variable | Effect |
 |----------|--------|

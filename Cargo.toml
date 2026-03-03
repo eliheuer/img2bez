@@ -1,13 +1,12 @@
 [package]
 name = "img2bez"
 version = "0.1.0"
-edition = "2021"
-description = "Bitmap image to font-ready bezier contours"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Eli Heuer <elih@protonmail.com>"]
+description = "Trace bitmap glyph images to bezier contours and insert them directly into UFO font sources"
+repository = "https://github.com/eliheuer/img2bez"
 license = "MIT"
-
-[lib]
-name = "img2bez"
-path = "src/lib.rs"
 
 [[bin]]
 name = "img2bez"
@@ -18,7 +17,6 @@ required-features = ["cli"]
 image = "0.25"
 imageproc = "0.25"
 kurbo = "0.13"
-
 rayon = "1.10"
 thiserror = "2"
 tiny-skia = "0.11"
