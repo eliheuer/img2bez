@@ -25,19 +25,19 @@ img2bez = { git = "https://github.com/eliheuer/img2bez" }
 # Basic usage: trace a glyph image and insert it into a UFO source
 img2bez --input glyph.png \
   --output MyFont.ufo \    # target UFO (must already exist)
-  --name A \                # glyph name in the UFO
-  --unicode 0041            # Unicode codepoint in hex
+  --name A \               # glyph name in the UFO
+  --unicode 0041           # Unicode codepoint in hex
 
 # With font metrics: scale and position the outline to match your UPM
 img2bez --input glyph.png \
   --output MyFont.ufo \
   --name A \
   --unicode 0041 \
-  --target-height 1088 \    # ascender - descender in font units (832 + 256)
+  --target-height 1024 \    # ascender - descender in font units
   --y-offset -256 \         # shift down by the descender value
   --grid 2                  # snap coordinates to a 2-unit grid
 
-# Compare the traced output against a hand-drawn reference glyph
+# Compare the traced output against a reference glyph
 img2bez --input glyph.png \
   --output MyFont.ufo \
   --name A \
