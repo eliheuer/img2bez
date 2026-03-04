@@ -45,6 +45,7 @@ pub struct Polygon {
 /// Prefix sums → longest straight subpaths → DP optimal polygon →
 /// sub-pixel vertex refinement.
 pub fn optimal_polygon(path: &PixelPath) -> Polygon {
+    debug_assert!(path.points.len() >= 3);
     let n = path.points.len();
     if n < 4 {
         let vertices = path
@@ -191,40 +192,12 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
                 break;
             }
 
-            // Update constraints (skip when |cur| <= 1 — no constraint).
+            // Update constraints (skip when |cur| <= 1).
             if !(cur.0.abs() <= 1 && cur.1.abs() <= 1) {
-                let off0 = (
-                    cur.0
-                        + if cur.1 >= 0 && (cur.1 > 0 || cur.0 < 0) {
-                            1
-                        } else {
-                            -1
-                        },
-                    cur.1
-                        + if cur.0 <= 0 && (cur.0 < 0 || cur.1 < 0) {
-                            1
-                        } else {
-                            -1
-                        },
-                );
+                let (off0, off1) = constraint_offsets(cur);
                 if xprod(constraint[0], off0) >= 0 {
                     constraint[0] = off0;
                 }
-
-                let off1 = (
-                    cur.0
-                        + if cur.1 <= 0 && (cur.1 < 0 || cur.0 < 0) {
-                            1
-                        } else {
-                            -1
-                        },
-                    cur.1
-                        + if cur.0 >= 0 && (cur.0 > 0 || cur.1 < 0) {
-                            1
-                        } else {
-                            -1
-                        },
-                );
                 if xprod(constraint[1], off1) <= 0 {
                     constraint[1] = off1;
                 }
@@ -233,7 +206,7 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
             k1 = k;
             k = nc[k1 % n];
 
-            if !cyclic(k % n, i, k1 % n, n) {
+            if !cyclic(k % n, i, k1 % n) {
                 pivk[i] = pivot_at_violation(pt, &constraint, k, k1, i, n);
                 break;
             }
@@ -244,7 +217,7 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
     let mut j = pivk[n - 1];
     lon[n - 1] = j;
     for i in (0..n - 2 + 1).rev() {
-        if cyclic(i + 1, pivk[i], j, n) {
+        if cyclic(i + 1, pivk[i], j) {
             j = pivk[i];
         }
         lon[i] = j;
@@ -253,7 +226,7 @@ fn calc_lon(pt: &[(i32, i32)]) -> Vec<usize> {
     // Fix up for cyclic path.
     {
         let mut i = n - 1;
-        while cyclic(pmod(i + 1, n), j, lon[i], n) {
+        while cyclic(pmod(i + 1, n), j, lon[i]) {
             lon[i] = j;
             if i == 0 {
                 break;
@@ -303,6 +276,9 @@ fn pivot_at_violation(
     if d > 0 {
         j = j.min(floordiv(-c, d));
     }
+    if j >= infty {
+        return k1 % n;
+    }
     pmod_signed((k1 % n) as isize + j as isize, n as isize)
 }
 
@@ -312,7 +288,13 @@ fn pivot_at_violation(
 ///
 /// Returns polygon vertex indices into the original path.
 #[allow(clippy::needless_range_loop)]
-fn best_polygon(pt: &[(i32, i32)], lon: &[usize], sums: &[Sums], x0: i32, y0: i32) -> Vec<usize> {
+fn best_polygon(
+    pt: &[(i32, i32)],
+    lon: &[usize],
+    sums: &[Sums],
+    x0: i32,
+    y0: i32,
+) -> Vec<usize> {
     let n = pt.len();
 
     // clip0[i] = farthest vertex reachable from i (clipping interval).
@@ -427,7 +409,14 @@ fn best_polygon(pt: &[(i32, i32)], lon: &[usize], sums: &[Sums], x0: i32, y0: i3
 /// ```
 ///
 /// All expectations are computed in O(1) via prefix sums.
-fn penalty3(pt: &[(i32, i32)], sums: &[Sums], x0: i32, y0: i32, i: usize, j: usize) -> f64 {
+fn penalty3(
+    pt: &[(i32, i32)],
+    sums: &[Sums],
+    x0: i32,
+    y0: i32,
+    i: usize,
+    j: usize,
+) -> f64 {
     let n = sums.len() - 1;
     let jn = j % n; // cyclic index into pt[]
 
@@ -578,7 +567,9 @@ fn point_slope(
     let c_cov = (y2 - y * y / k) / k;
 
     // Largest eigenvalue's eigenvector = direction of maximum variance.
-    let lambda2 = (a_cov + c_cov + ((a_cov - c_cov).powi(2) + 4.0 * b_cov * b_cov).sqrt()) / 2.0;
+    let discriminant =
+        ((a_cov - c_cov).powi(2) + 4.0 * b_cov * b_cov).sqrt();
+    let lambda2 = (a_cov + c_cov + discriminant) / 2.0;
 
     let a2 = a_cov - lambda2;
     let c2 = c_cov - lambda2;
@@ -692,12 +683,48 @@ fn constrain_to_box(q: &[[f64; 3]; 3], center: (f64, f64)) -> (f64, f64) {
 
 // ── Helpers ──────────────────────────────────────────────
 
+/// Compute constraint offsets for the ±0.5 pixel envelope.
+///
+/// Given the vector `cur` from the start vertex to the current
+/// vertex, returns the two constraint offsets (off0, off1) that
+/// bound the angular corridor. Each offset shifts `cur` by ±1
+/// per axis to model the half-pixel envelope around the line.
+fn constraint_offsets(cur: (i32, i32)) -> ((i32, i32), (i32, i32)) {
+    let off0 = (
+        cur.0 + if cur.1 > 0 || (cur.1 == 0 && cur.0 < 0) {
+            1
+        } else {
+            -1
+        },
+        cur.1 + if cur.0 < 0 || (cur.0 == 0 && cur.1 < 0) {
+            1
+        } else {
+            -1
+        },
+    );
+    let off1 = (
+        cur.0 + if cur.1 < 0 || (cur.1 == 0 && cur.0 < 0) {
+            1
+        } else {
+            -1
+        },
+        cur.1 + if cur.0 > 0 || (cur.0 == 0 && cur.1 < 0) {
+            1
+        } else {
+            -1
+        },
+    );
+    (off0, off1)
+}
+
 /// Integer cross product.
+#[inline]
 fn xprod(a: (i32, i32), b: (i32, i32)) -> i64 {
     a.0 as i64 * b.1 as i64 - a.1 as i64 * b.0 as i64
 }
 
 /// Sign function: -1, 0, or 1.
+#[inline]
 fn sign(x: i32) -> i32 {
     if x > 0 {
         1
@@ -709,16 +736,19 @@ fn sign(x: i32) -> i32 {
 }
 
 /// Proper modulo for unsigned (always non-negative).
+#[inline]
 fn pmod(a: usize, n: usize) -> usize {
     ((a % n) + n) % n
 }
 
 /// Proper modulo for signed values (always non-negative result).
+#[inline]
 fn pmod_signed(a: isize, n: isize) -> usize {
     (((a % n) + n) % n) as usize
 }
 
 /// Floor division for signed values (rounds toward negative infinity).
+#[inline]
 fn floordiv(a: i64, b: i64) -> i64 {
     if a >= 0 {
         a / b
@@ -728,7 +758,8 @@ fn floordiv(a: i64, b: i64) -> i64 {
 }
 
 /// Check if b is in the cyclic interval [a, c) mod n.
-fn cyclic(a: usize, b: usize, c: usize, _n: usize) -> bool {
+#[inline]
+fn cyclic(a: usize, b: usize, c: usize) -> bool {
     if a <= c {
         a <= b && b < c
     } else {
@@ -740,6 +771,41 @@ fn cyclic(a: usize, b: usize, c: usize, _n: usize) -> bool {
 mod tests {
     use super::super::decompose::PixelPath;
     use super::*;
+
+    #[test]
+    fn polygon_reduces_vertex_count() {
+        use image::GrayImage;
+        // Create a circular blob and decompose it to get a proper PixelPath
+        let mut img = GrayImage::new(20, 20);
+        let cx = 10.0_f64;
+        let cy = 10.0_f64;
+        let r = 7.0_f64;
+        for y in 0..20 {
+            for x in 0..20 {
+                let dx = x as f64 - cx;
+                let dy = y as f64 - cy;
+                if dx * dx + dy * dy <= r * r {
+                    img.put_pixel(x, y, image::Luma([255]));
+                }
+            }
+        }
+        let paths = crate::vectorize::decompose::decompose(&img, 2);
+        assert!(!paths.is_empty(), "Should have at least 1 contour");
+        let path = &paths[0];
+        let input_count = path.points.len();
+        assert!(
+            input_count >= 20,
+            "Circle perimeter should have >= 20 points, got {}",
+            input_count
+        );
+        let poly = optimal_polygon(path);
+        assert!(
+            poly.vertices.len() < input_count / 2,
+            "Polygon should reduce vertices by at least 2x: {} input → {} output",
+            input_count,
+            poly.vertices.len()
+        );
+    }
 
     #[test]
     fn rectangle_produces_4_vertices() {

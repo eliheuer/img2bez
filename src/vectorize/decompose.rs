@@ -90,7 +90,7 @@ pub fn decompose(gray: &GrayImage, min_area: usize) -> Vec<PixelPath> {
             if bm.get(x, y) {
                 // Determine sign using the ORIGINAL bitmap (not the XOR'd working copy).
                 // If pixel below is not set in original → outer boundary.
-                let below_set = if y > 0 && y - 1 < bm.height && x >= 0 && x < bm.width {
+                let below_set = if y > 0 {
                     orig[((y - 1) * bm.width + x) as usize]
                 } else {
                     false
@@ -120,9 +120,15 @@ fn find_path(bm: &Bitmap, x0: i32, y0: i32, sign: i8) -> PixelPath {
     let mut y = y0;
     let mut dx: i32 = 0;
     let mut dy: i32 = sign as i32; // +1 (up) for outer, -1 (down) for hole
+    // Maximum possible contour length: every pixel corner visited once.
+    let max_points = 4 * (bm.width as usize + 1) * (bm.height as usize + 1);
 
     loop {
         points.push((x, y));
+
+        if points.len() > max_points {
+            break;
+        }
 
         // Pixel offset formulas for the dual grid.
         //
@@ -221,4 +227,62 @@ fn path_area(points: &[(i32, i32)]) -> f64 {
         area += points[i].0 as i64 * points[j].1 as i64 - points[j].0 as i64 * points[i].1 as i64;
     }
     area as f64 / 2.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::GrayImage;
+
+    #[test]
+    fn solid_rectangle_one_outer_contour() {
+        let mut img = GrayImage::new(12, 12);
+        for y in 3..9 {
+            for x in 3..9 {
+                img.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let paths = decompose(&img, 2);
+        assert_eq!(paths.len(), 1, "Expected 1 contour, got {}", paths.len());
+        assert_eq!(paths[0].sign, 1, "Expected outer contour (sign=1)");
+        assert!(
+            paths[0].points.len() >= 20,
+            "Expected >= 20 perimeter points, got {}",
+            paths[0].points.len()
+        );
+    }
+
+    #[test]
+    fn ring_produces_two_contours() {
+        let mut img = GrayImage::new(16, 16);
+        // Outer 10x10 white rect at (3,3)
+        for y in 3..13 {
+            for x in 3..13 {
+                img.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        // Inner 4x4 black hole at (6,6)
+        for y in 6..10 {
+            for x in 6..10 {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        let paths = decompose(&img, 2);
+        assert_eq!(paths.len(), 2, "Expected 2 contours, got {}", paths.len());
+        let signs: std::collections::HashSet<i8> = paths.iter().map(|p| p.sign).collect();
+        assert!(signs.contains(&1), "Expected an outer contour (sign=1)");
+        assert!(signs.contains(&-1), "Expected a hole contour (sign=-1)");
+    }
+
+    #[test]
+    fn empty_image_no_contours() {
+        let img = GrayImage::new(10, 10);
+        let paths = decompose(&img, 2);
+        assert_eq!(
+            paths.len(),
+            0,
+            "Expected 0 contours for all-black image, got {}",
+            paths.len()
+        );
+    }
 }

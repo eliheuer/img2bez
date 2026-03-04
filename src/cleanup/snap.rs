@@ -79,3 +79,29 @@ fn snap_handle(handle: Point, anchor: Point, threshold: f64) -> Point {
     }
     handle
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kurbo::{BezPath, PathEl, Point};
+
+    #[test]
+    fn grid_snap_rounds_oncurve() {
+        let mut path = BezPath::new();
+        path.move_to(Point::new(10.3, 20.7));
+        path.line_to(Point::new(50.9, 30.1));
+        path.line_to(Point::new(41.4, 61.6));
+        path.push(PathEl::ClosePath);
+
+        let snapped = to_grid(&path, 2.0);
+        for el in snapped.elements() {
+            match el {
+                PathEl::MoveTo(p) | PathEl::LineTo(p) => {
+                    assert_eq!(p.x % 2.0, 0.0, "x={} not a multiple of 2", p.x);
+                    assert_eq!(p.y % 2.0, 0.0, "y={} not a multiple of 2", p.y);
+                }
+                _ => {}
+            }
+        }
+    }
+}

@@ -100,6 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None => img2bez::ThresholdMethod::Otsu,
         },
         codepoints,
+        verbose: true,
         ..TracingConfig::default()
     };
 
@@ -177,6 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         font_scale,
         cli.y_offset,
         result.reposition_shift,
+        true,
     )?;
     eprintln!("  Compare     {}", comparison_path.display());
 

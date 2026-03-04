@@ -64,6 +64,11 @@ pub struct TracingConfig {
     pub y_offset: f64,
     /// Unicode codepoints to assign (used by output backends).
     pub codepoints: Vec<char>,
+
+    // -- Diagnostics --
+    /// Print progress to stderr. Libraries default to `false`;
+    /// set `true` in CLI binaries to restore step-by-step output.
+    pub verbose: bool,
 }
 
 /// Threshold method for converting a grayscale image to binary.
@@ -94,6 +99,7 @@ impl Default for TracingConfig {
             target_height: 1000.0,   // UPM-relative; 1088 for VG (asc-desc)
             y_offset: 0.0,           // set to descender (e.g. -256) to align baseline
             codepoints: vec![],
+            verbose: false,
         }
     }
 }

@@ -30,6 +30,7 @@
 //! | `IMG2BEZ_DEBUG_PIXELDIFF`     | Save 1:1 pixel diff image                       |
 
 #![forbid(unsafe_code)]
+#![allow(clippy::many_single_char_names)]
 
 mod bitmap;
 mod cleanup;
@@ -86,7 +87,10 @@ pub struct TraceResult {
 ///
 /// Pipeline: pixel-edge contour extraction on the dual grid,
 /// optimal polygon approximation via DP, and alpha-based curve generation.
-pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, TraceError> {
+pub fn trace(
+    image_path: &Path,
+    config: &TracingConfig,
+) -> Result<TraceResult, TraceError> {
     let t_start = Instant::now();
 
     // ── Load & threshold ──────────────────────────────────
@@ -97,7 +101,9 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
         ThresholdMethod::Otsu => "Otsu".to_string(),
         ThresholdMethod::Fixed(t) => format!("fixed {}", t),
     };
-    eprintln!("  Load        {}x{} px, {} threshold", w, h, threshold_name);
+    if config.verbose {
+        eprintln!("  Load        {}x{} px, {} threshold", w, h, threshold_name);
+    }
 
     // ── Vectorize ─────────────────────────────────────────
     let curves = vectorize::trace(&gray, config);
@@ -105,17 +111,21 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
         return Err(TraceError::NoContours);
     }
     let (raw_curves, raw_lines) = count_segments(&curves);
-    eprintln!(
-        "  Trace       {} contours \u{2192} {} curves + {} lines  (scale \u{00d7}{:.2})",
-        curves.len(),
-        raw_curves,
-        raw_lines,
-        scale,
-    );
+    if config.verbose {
+        eprintln!(
+            "  Trace       {} contours \u{2192} {} curves + {} lines  (scale \u{00d7}{:.2})",
+            curves.len(),
+            raw_curves,
+            raw_lines,
+            scale,
+        );
+    }
 
     // ── Post-processing ───────────────────────────────────
     let paths = if std::env::var("IMG2BEZ_DEBUG_NO_CLEANUP").is_ok() {
-        eprintln!("  Debug       skipping cleanup");
+        if config.verbose {
+            eprintln!("  Debug       skipping cleanup");
+        }
         curves.clone()
     } else {
         cleanup::process(&curves, config)
@@ -142,28 +152,34 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
     if config.chamfer_size > 0.0 {
         steps.push("chamfer");
     }
-    eprintln!("  Clean       {}", steps.join(" \u{00b7} "));
+    if config.verbose {
+        eprintln!("  Clean       {}", steps.join(" \u{00b7} "));
+    }
 
     // ── Metrics ───────────────────────────────────────────
     // Debug: show bounding box before reposition
     {
         use kurbo::Shape;
-        if let Some(bb) = paths
-            .iter()
-            .map(|p| p.bounding_box())
-            .reduce(|a: kurbo::Rect, b| a.union(b))
-        {
-            eprintln!(
-                "  Pre-repos   bbox x=[{:.1}, {:.1}] y=[{:.1}, {:.1}]",
-                bb.x0, bb.x1, bb.y0, bb.y1
-            );
+        if config.verbose {
+            if let Some(bb) = paths
+                .iter()
+                .map(|p| p.bounding_box())
+                .reduce(|a: kurbo::Rect, b| a.union(b))
+            {
+                eprintln!(
+                    "  Pre-repos   bbox x=[{:.1}, {:.1}] y=[{:.1}, {:.1}]",
+                    bb.x0, bb.x1, bb.y0, bb.y1
+                );
+            }
         }
     }
     let (paths, reposition_shift) = metrics::reposition(&paths, config.lsb, config.grid);
-    eprintln!(
-        "  Reposition  shift=({:.1}, {:.1})  lsb={:.1}",
-        reposition_shift.0, reposition_shift.1, config.lsb
-    );
+    if config.verbose {
+        eprintln!(
+            "  Reposition  shift=({:.1}, {:.1})  lsb={:.1}",
+            reposition_shift.0, reposition_shift.1, config.lsb
+        );
+    }
     let advance_width = config
         .advance_width
         .unwrap_or_else(|| metrics::advance_from_bounds(&paths, config.rsb));
@@ -175,11 +191,16 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
     let n_counter = contour_types.len() - n_outer;
     let (on, off) = count_points(&paths);
     let elapsed = t_start.elapsed().as_millis();
-    eprintln!(
-        "  Result      {} contours ({} outer, {} counter) \u{00b7} {} points ({} on-curve) \u{00b7} width {}  ({}ms)",
-        contour_types.len(), n_outer, n_counter,
-        on + off, on, advance_width as i64, elapsed,
-    );
+    if config.verbose {
+        eprintln!(
+            "  Result      {} contours ({} outer, {} counter)",
+            contour_types.len(), n_outer, n_counter,
+        );
+        eprintln!(
+            "              {} points ({} on-curve) \u{00b7} width {}  ({}ms)",
+            on + off, on, advance_width as i64, elapsed,
+        );
+    }
 
     Ok(TraceResult {
         paths,
@@ -228,6 +249,40 @@ fn count_points(paths: &[BezPath]) -> (usize, usize) {
         }
     }
     (on, off)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::GrayImage;
+    use kurbo::PathEl;
+
+    #[test]
+    fn trace_rectangle_bitmap() {
+        // Create a 20×20 image with a 10×10 white rectangle
+        let mut img = GrayImage::new(20, 20);
+        for y in 5..15 {
+            for x in 5..15 {
+                img.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let config = TracingConfig {
+            target_height: 100.0,
+            ..TracingConfig::default()
+        };
+        let paths = vectorize::trace(&img, &config);
+        assert_eq!(paths.len(), 1, "Expected 1 contour, got {}", paths.len());
+        let elements = paths[0].elements();
+        assert!(!elements.is_empty(), "Path should not be empty");
+        assert!(
+            matches!(elements[0], PathEl::MoveTo(_)),
+            "First element should be MoveTo"
+        );
+        assert!(
+            matches!(elements.last().unwrap(), PathEl::ClosePath),
+            "Last element should be ClosePath"
+        );
+    }
 }
 
 /// Convenience: trace and write directly into a UFO.

@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use kurbo::{BezPath, PathEl};
+use tiny_skia::PremultipliedColorU8;
 
 // ── Comparison panel layout ──────────────────────────────
 
@@ -26,6 +27,13 @@ const RASTER_CANVAS_SIZE: u32 = 600;
 
 /// Padding around the glyph in the raster comparison canvas.
 const RASTER_PADDING: f64 = 20.0;
+
+/// Create an opaque premultiplied color. With alpha=255 the RGB values
+/// pass through unchanged, so `from_rgba` cannot fail.
+#[inline]
+fn opaque(r: u8, g: u8, b: u8) -> PremultipliedColorU8 {
+    PremultipliedColorU8::from_rgba(r, g, b, 255).expect("alpha=255 is always valid")
+}
 
 /// Convert a kurbo `BezPath` to a `tiny_skia::Path`.
 fn kurbo_to_tinyskia(
@@ -61,6 +69,7 @@ fn kurbo_to_tinyskia(
 }
 
 /// Apply transform manually to a point (f64 → f32).
+#[inline]
 fn transform_point(x: f64, y: f64, t: tiny_skia::Transform) -> (f32, f32) {
     let x = x as f32;
     let y = y as f32;
@@ -68,15 +77,52 @@ fn transform_point(x: f64, y: f64, t: tiny_skia::Transform) -> (f32, f32) {
 }
 
 /// Encode a pixmap to PNG bytes.
-fn encode_png(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+fn encode_png(pixmap: &tiny_skia::Pixmap) -> Result<Vec<u8>, std::io::Error> {
     let mut buf = Vec::new();
     let mut encoder = png::Encoder::new(&mut buf, pixmap.width(), pixmap.height());
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().unwrap();
-    writer.write_image_data(pixmap.data()).unwrap();
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    writer
+        .write_image_data(pixmap.data())
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     drop(writer);
-    buf
+    Ok(buf)
+}
+
+/// Render BezPaths as filled black on a white square pixmap.
+///
+/// Combines all paths into a single fill (EvenOdd rule) without
+/// anti-aliasing, for crisp pixel comparison.
+fn render_paths_to_pixmap(
+    paths: &[BezPath],
+    size: u32,
+    transform: tiny_skia::Transform,
+) -> tiny_skia::Pixmap {
+    let mut pm = tiny_skia::Pixmap::new(size, size).expect("non-zero canvas size");
+    pm.fill(tiny_skia::Color::WHITE);
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(tiny_skia::Color::BLACK);
+    paint.anti_alias = false;
+
+    let mut combined = BezPath::new();
+    for p in paths {
+        for el in p.elements() {
+            combined.push(*el);
+        }
+    }
+    if let Some(sk) = kurbo_to_tinyskia(&combined, transform) {
+        pm.fill_path(
+            &sk,
+            &paint,
+            tiny_skia::FillRule::EvenOdd,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
+    pm
 }
 
 /// Render a side-by-side comparison PNG.
@@ -94,6 +140,7 @@ pub fn render_comparison(
     font_scale: f64,
     y_offset: f64,
     reposition_shift: (f64, f64),
+    verbose: bool,
 ) -> Result<(), std::io::Error> {
     let panel_h: u32 = PANEL_HEIGHT;
     let panel_w: u32 = PANEL_WIDTH;
@@ -105,7 +152,7 @@ pub fn render_comparison(
 
     // Load and threshold source image
     let img = image::open(source_image)
-        .expect("failed to open source image")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?
         .into_luma8();
     let threshold = imageproc::contrast::otsu_level(&img);
     let binary = imageproc::contrast::threshold(
@@ -129,7 +176,7 @@ pub fn render_comparison(
         rendered_h,
         image::imageops::FilterType::Nearest,
     );
-    let mut source_panel = tiny_skia::Pixmap::new(panel_w, panel_h).unwrap();
+    let mut source_panel = tiny_skia::Pixmap::new(panel_w, panel_h).expect("non-zero panel size");
     source_panel.fill(tiny_skia::Color::WHITE);
     for y in 0..rendered_h {
         for x in 0..rendered_w {
@@ -137,7 +184,7 @@ pub fn render_comparison(
             let dst_x = ox + x;
             let dst_y = oy + y;
             if dst_x < panel_w && dst_y < panel_h {
-                let pm = tiny_skia::PremultipliedColorU8::from_rgba(luma, luma, luma, 255).unwrap();
+                let pm = opaque(luma, luma, luma);
                 source_panel.pixels_mut()[(dst_y * panel_w + dst_x) as usize] = pm;
             }
         }
@@ -169,22 +216,27 @@ pub fn render_comparison(
     // where s = img_scale / font_scale
     let (dx, dy) = reposition_shift;
     let s = img_scale as f64 / font_scale;
-    eprintln!(
-        "  Render      src={}x{} img_scale={:.4} font_scale={:.4} s={:.6}",
-        src_w, src_h, img_scale, font_scale, s
-    );
-    eprintln!(
-        "  Render      rendered={}x{} ox={} oy={} padding={}",
-        rendered_w, rendered_h, ox, oy, padding
-    );
-    eprintln!(
-        "  Render      dx={:.1} dy={:.1} y_offset={:.1}",
-        dx, dy, y_offset
-    );
+    if verbose {
+        eprintln!(
+            "  Render      src={}x{} img_scale={:.4} font_scale={:.4} s={:.6}",
+            src_w, src_h, img_scale, font_scale, s
+        );
+        eprintln!(
+            "  Render      rendered={}x{} ox={} oy={} padding={}",
+            rendered_w, rendered_h, ox, oy, padding
+        );
+        eprintln!(
+            "  Render      dx={:.1} dy={:.1} y_offset={:.1}",
+            dx, dy, y_offset
+        );
+    }
     let tx = (ox as f64 - s * dx) as f32;
     let ty = (oy as f64 + rendered_h as f64 + s * (dy + y_offset)) as f32;
-    eprintln!("  Render      tx={:.2} ty={:.2}", tx, ty);
-    // Verify: map font point (dx, -dy + y_offset) back — should give (ox, oy+rendered_h) i.e. bottom-left
+    if verbose {
+        eprintln!("  Render      tx={:.2} ty={:.2}", tx, ty);
+    }
+    // Verify: map font origin back to display coords.
+    // Should give (ox, oy+rendered_h) = bottom-left.
     // Actually map the pre-reposition origin (0,0) in pixel-corner coords:
     //   font coords = (0*scale + dx, 0*scale + y_offset + dy)
     //   display = (s*(dx - dx) + ox, -s*(y_offset+dy - dy - y_offset) + oy + rendered_h)
@@ -198,7 +250,7 @@ pub fn render_comparison(
         ty,
     };
 
-    let mut traced_panel = tiny_skia::Pixmap::new(panel_w, panel_h).unwrap();
+    let mut traced_panel = tiny_skia::Pixmap::new(panel_w, panel_h).expect("non-zero panel size");
     traced_panel.fill(tiny_skia::Color::WHITE);
     let mut paint = tiny_skia::Paint::default();
     paint.set_color(tiny_skia::Color::BLACK);
@@ -239,7 +291,7 @@ pub fn render_comparison(
 
     // ── Composite ──
     let total_w = panel_w * 3 + separator * 2;
-    let mut final_pixmap = tiny_skia::Pixmap::new(total_w, panel_h).unwrap();
+    let mut final_pixmap = tiny_skia::Pixmap::new(total_w, panel_h).expect("non-zero panel size");
     final_pixmap.fill(tiny_skia::Color::from_rgba8(200, 200, 200, 255));
     for y in 0..panel_h {
         for x in 0..panel_w {
@@ -252,7 +304,7 @@ pub fn render_comparison(
         }
     }
 
-    let png_data = encode_png(&final_pixmap);
+    let png_data = encode_png(&final_pixmap)?;
     std::fs::write(output_path, png_data)?;
 
     // ── 1:1 pixel diff (debug) ──
@@ -268,7 +320,7 @@ pub fn render_comparison(
             tx: (-(s1 * dx)) as f32,
             ty: (src_h as f64 + s1 * (dy + y_offset)) as f32,
         };
-        let mut contour_pm = tiny_skia::Pixmap::new(src_w, src_h).unwrap();
+        let mut contour_pm = tiny_skia::Pixmap::new(src_w, src_h).expect("non-zero image size");
         contour_pm.fill(tiny_skia::Color::WHITE);
         let mut black = tiny_skia::Paint::default();
         black.set_color(tiny_skia::Color::BLACK);
@@ -309,7 +361,7 @@ pub fn render_comparison(
             both + contour_only
         );
         // Save the diff image: green=overlap, red=contour-only, blue=source-only
-        let mut diff_pm = tiny_skia::Pixmap::new(src_w, src_h).unwrap();
+        let mut diff_pm = tiny_skia::Pixmap::new(src_w, src_h).expect("non-zero image size");
         diff_pm.fill(tiny_skia::Color::WHITE);
         for y in 0..src_h {
             for x in 0..src_w {
@@ -318,25 +370,20 @@ pub fn render_comparison(
                 let cnt_is_black = cnt_px.red() < 128;
                 let src_is_black = src_px < 128;
                 let color = match (src_is_black, cnt_is_black) {
-                    (true, true) => {
-                        tiny_skia::PremultipliedColorU8::from_rgba(0, 128, 0, 255).unwrap()
-                    }
-                    (true, false) => {
-                        tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 255, 255).unwrap()
-                    }
-                    (false, true) => {
-                        tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap()
-                    }
+                    (true, true) => opaque(0, 128, 0),
+                    (true, false) => opaque(0, 0, 255),
+                    (false, true) => opaque(255, 0, 0),
                     (false, false) => continue,
                 };
                 diff_pm.pixels_mut()[(y * src_w + x) as usize] = color;
             }
         }
-        let diff_path = output_path.with_file_name(format!(
-            "{}_pixeldiff.png",
-            output_path.file_stem().unwrap().to_str().unwrap()
-        ));
-        std::fs::write(&diff_path, encode_png(&diff_pm))?;
+        let stem = output_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let diff_path = output_path.with_file_name(format!("{}_pixeldiff.png", stem));
+        std::fs::write(&diff_path, encode_png(&diff_pm)?)?;
         eprintln!("  PixelDiff   saved {}", diff_path.display());
     }
 
@@ -433,47 +480,13 @@ pub fn raster_compare(
         ty: (ref_ty - dy * scale) as f32,
     };
 
-    // Render traced (center-aligned to reference).
-    let mut traced_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).unwrap();
-    traced_pm.fill(tiny_skia::Color::WHITE);
-    let mut paint = tiny_skia::Paint::default();
-    paint.set_color(tiny_skia::Color::BLACK);
-    paint.anti_alias = false; // crisp comparison
-
-    let mut combined_traced = BezPath::new();
-    for p in traced_paths {
-        for el in p.elements() {
-            combined_traced.push(*el);
-        }
-    }
-    if let Some(sk) = kurbo_to_tinyskia(&combined_traced, traced_transform) {
-        traced_pm.fill_path(
-            &sk,
-            &paint,
-            tiny_skia::FillRule::EvenOdd,
-            tiny_skia::Transform::identity(),
-            None,
-        );
-    }
-
-    // Render reference.
-    let mut ref_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).unwrap();
-    ref_pm.fill(tiny_skia::Color::WHITE);
-    let mut combined_ref = BezPath::new();
-    for p in reference_paths {
-        for el in p.elements() {
-            combined_ref.push(*el);
-        }
-    }
-    if let Some(sk) = kurbo_to_tinyskia(&combined_ref, ref_transform) {
-        ref_pm.fill_path(
-            &sk,
-            &paint,
-            tiny_skia::FillRule::EvenOdd,
-            tiny_skia::Transform::identity(),
-            None,
-        );
-    }
+    // Render traced (center-aligned) and reference.
+    let traced_pm = render_paths_to_pixmap(
+        traced_paths, canvas_size, traced_transform,
+    );
+    let ref_pm = render_paths_to_pixmap(
+        reference_paths, canvas_size, ref_transform,
+    );
 
     // Compare pixels.
     let total = (canvas_size * canvas_size) as usize;
@@ -481,7 +494,7 @@ pub fn raster_compare(
     let mut traced_only: u64 = 0;
     let mut ref_only: u64 = 0;
 
-    let mut diff_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).unwrap();
+    let mut diff_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).expect("non-zero canvas size");
     diff_pm.fill(tiny_skia::Color::from_rgba8(32, 32, 32, 255));
 
     for i in 0..total {
@@ -490,15 +503,15 @@ pub fn raster_compare(
         let color = match (t_black, r_black) {
             (true, true) => {
                 overlap += 1;
-                tiny_skia::PremultipliedColorU8::from_rgba(0, 180, 0, 255).unwrap()
+                opaque(0, 180, 0)
             }
             (true, false) => {
                 traced_only += 1;
-                tiny_skia::PremultipliedColorU8::from_rgba(220, 60, 60, 255).unwrap()
+                opaque(220, 60, 60)
             }
             (false, true) => {
                 ref_only += 1;
-                tiny_skia::PremultipliedColorU8::from_rgba(60, 60, 220, 255).unwrap()
+                opaque(60, 60, 220)
             }
             (false, false) => continue,
         };
@@ -515,7 +528,7 @@ pub fn raster_compare(
     };
 
     let diff_path = output_dir.join(format!("{}_raster_diff.png", glyph_name));
-    std::fs::write(&diff_path, encode_png(&diff_pm))?;
+    std::fs::write(&diff_path, encode_png(&diff_pm)?)?;
 
     Ok(RasterCompare {
         iou,

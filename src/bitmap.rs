@@ -20,7 +20,9 @@ pub fn load_and_threshold(path: &Path, config: &TracingConfig) -> Result<GrayIma
         ThresholdMethod::Fixed(t) => t,
         ThresholdMethod::Otsu => {
             let t = otsu_level(&img);
-            eprintln!("  Threshold   Otsu = {}", t);
+            if config.verbose {
+                eprintln!("  Threshold   Otsu = {}", t);
+            }
             t
         }
     };

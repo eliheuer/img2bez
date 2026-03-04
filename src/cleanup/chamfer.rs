@@ -85,3 +85,40 @@ pub fn chamfer(path: &BezPath, size: f64, min_edge: f64) -> BezPath {
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kurbo::{BezPath, PathEl, Point};
+
+    #[test]
+    fn right_angle_gets_chamfered() {
+        // Square with edges > min_edge
+        let mut path = BezPath::new();
+        path.move_to(Point::new(0.0, 0.0));
+        path.line_to(Point::new(100.0, 0.0));
+        path.line_to(Point::new(100.0, 100.0));
+        path.line_to(Point::new(0.0, 100.0));
+        path.push(PathEl::ClosePath);
+
+        let input_points = path
+            .elements()
+            .iter()
+            .filter(|el| matches!(el, PathEl::MoveTo(_) | PathEl::LineTo(_)))
+            .count();
+
+        let result = chamfer(&path, 10.0, 5.0);
+        let output_points = result
+            .elements()
+            .iter()
+            .filter(|el| matches!(el, PathEl::MoveTo(_) | PathEl::LineTo(_)))
+            .count();
+
+        assert!(
+            output_points > input_points,
+            "Chamfered square should have more points ({}) than input ({})",
+            output_points,
+            input_points
+        );
+    }
+}

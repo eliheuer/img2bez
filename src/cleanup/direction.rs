@@ -49,6 +49,7 @@ pub fn fix_directions(paths: &[BezPath]) -> Vec<BezPath> {
 
 /// Reverse a BezPath's winding direction.
 fn reverse_path(path: &BezPath) -> BezPath {
+    debug_assert!(!path.elements().is_empty());
     let mut first = Point::ZERO;
     let mut segments: Vec<(Point, Seg)> = Vec::new();
     let mut closed = false;
@@ -78,7 +79,7 @@ fn reverse_path(path: &BezPath) -> BezPath {
         return output;
     }
 
-    output.move_to(segments.last().unwrap().0);
+    output.move_to(segments[segments.len() - 1].0);
 
     for i in (0..segments.len()).rev() {
         let target = if i == 0 { first } else { segments[i - 1].0 };
@@ -115,6 +116,9 @@ fn flatten_to_polygon(path: &BezPath, tolerance: f64) -> Vec<Point> {
 
 /// Centroid (mean of all points) of a polygon.
 fn centroid(points: &[Point]) -> Point {
+    if points.is_empty() {
+        return Point::ZERO;
+    }
     let n = points.len() as f64;
     let sum_x: f64 = points.iter().map(|p| p.x).sum();
     let sum_y: f64 = points.iter().map(|p| p.y).sum();
@@ -152,4 +156,70 @@ enum Seg {
     Line,
     Curve(Point, Point),
     Quad(Point),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::signed_area;
+    use kurbo::{BezPath, PathEl, Point};
+
+    #[test]
+    fn ccw_contour_unchanged() {
+        // CCW square: (0,0) → (100,0) → (100,100) → (0,100) → close
+        let mut path = BezPath::new();
+        path.move_to(Point::new(0.0, 0.0));
+        path.line_to(Point::new(100.0, 0.0));
+        path.line_to(Point::new(100.0, 100.0));
+        path.line_to(Point::new(0.0, 100.0));
+        path.push(PathEl::ClosePath);
+        let area_before = signed_area(&path);
+        assert!(area_before > 0.0, "Input should be CCW (positive area)");
+
+        let result = fix_directions(&[path]);
+        assert_eq!(result.len(), 1);
+        let area_after = signed_area(&result[0]);
+        assert!(area_after > 0.0, "Output should still be CCW (positive area)");
+    }
+
+    #[test]
+    fn nested_contours_correct_winding() {
+        // Outer CCW square (centroid at 100,100)
+        let mut outer = BezPath::new();
+        outer.move_to(Point::new(0.0, 0.0));
+        outer.line_to(Point::new(200.0, 0.0));
+        outer.line_to(Point::new(200.0, 200.0));
+        outer.line_to(Point::new(0.0, 200.0));
+        outer.push(PathEl::ClosePath);
+        // Inner CW square, offset so centroids differ (centroid at 150,150)
+        let mut inner = BezPath::new();
+        inner.move_to(Point::new(120.0, 120.0));
+        inner.line_to(Point::new(120.0, 180.0));
+        inner.line_to(Point::new(180.0, 180.0));
+        inner.line_to(Point::new(180.0, 120.0));
+        inner.push(PathEl::ClosePath);
+
+        // Already correct: outer CCW, inner CW
+        let result = fix_directions(&[outer, inner]);
+        assert!(signed_area(&result[0]) > 0.0, "Outer should be CCW");
+        assert!(signed_area(&result[1]) < 0.0, "Inner should be CW");
+
+        // Now swap windings (both wrong) and verify fix_directions corrects them
+        let mut outer_wrong = BezPath::new();
+        outer_wrong.move_to(Point::new(0.0, 0.0));
+        outer_wrong.line_to(Point::new(0.0, 200.0));
+        outer_wrong.line_to(Point::new(200.0, 200.0));
+        outer_wrong.line_to(Point::new(200.0, 0.0));
+        outer_wrong.push(PathEl::ClosePath);
+        let mut inner_wrong = BezPath::new();
+        inner_wrong.move_to(Point::new(120.0, 120.0));
+        inner_wrong.line_to(Point::new(180.0, 120.0));
+        inner_wrong.line_to(Point::new(180.0, 180.0));
+        inner_wrong.line_to(Point::new(120.0, 180.0));
+        inner_wrong.push(PathEl::ClosePath);
+
+        let result2 = fix_directions(&[outer_wrong, inner_wrong]);
+        assert!(signed_area(&result2[0]) > 0.0, "Fixed outer should be CCW");
+        assert!(signed_area(&result2[1]) < 0.0, "Fixed inner should be CW");
+    }
 }

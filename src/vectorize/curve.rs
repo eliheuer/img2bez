@@ -5,6 +5,8 @@
 //! through each short section. Because sections run extrema-to-extrema,
 //! handles naturally align H/V and point counts stay minimal.
 
+use std::collections::HashSet;
+
 use kurbo::{fit_to_bezpath_opt, simplify::SimplifyBezPath, BezPath, PathEl, Point};
 
 use super::polygon::Polygon;
@@ -235,6 +237,7 @@ fn find_segment_extrema(
 /// 6. **Pass 2: emit** — lines become `LineTo`, curves get a single cubic
 ///    fit via `fit_single_cubic()`, then H/V snap + collinear merge.
 pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
+    debug_assert!(poly.vertices.len() >= 3);
     let m = poly.vertices.len();
     if m < 3 {
         return BezPath::new();
@@ -276,7 +279,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // straight sections meet curved sections. Both are needed even
     // when they're near each other (e.g., a chamfered corner adjacent
     // to a stem/curve boundary).
-    let corner_set: std::collections::HashSet<usize> = corners.iter().copied().collect();
+    let corner_set: HashSet<usize> = corners.iter().copied().collect();
     let mut base_splits: Vec<usize> = corners
         .iter()
         .copied()
@@ -287,81 +290,9 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // Merge only non-corner transitions that are at the same vertex.
     base_splits = merge_nearby_preserve_corners(base_splits, 1, m, &corner_set);
 
-    let mut split_points = if base_splits.is_empty() {
-        // No corners or transitions: use global bounding-box extrema.
-        find_contour_extrema(v)
-    } else {
-        // Per-segment: find extrema only in curved sections (not straight).
-        let mut pts = base_splits.clone();
-        let mut extrema_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let ns = base_splits.len();
-        for si in 0..ns {
-            let start = base_splits[si];
-            let end = base_splits[(si + 1) % ns];
-            let segment = extract_cyclic(v, start, end, m);
-            if segment.len() > 2 {
-                let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
-                let dev = collinear_deviation(&smoothed);
-                let s0 = smoothed[0];
-                let sn = smoothed[smoothed.len() - 1];
-                let slen = ((sn.0 - s0.0).powi(2) + (sn.1 - s0.1).powi(2)).sqrt();
-                let tol = (slen * 0.02).max(3.0);
-                if dev > tol {
-                    let seg_ext = find_segment_extrema(v, start, end, m);
-                    for &e in &seg_ext {
-                        extrema_set.insert(e);
-                    }
-                    pts.extend(seg_ext);
-                }
-            }
-        }
-        pts.sort_unstable();
-        pts.dedup();
-
-        // Remove transitions that create very short sections.
-        // When a curvature transition fires close to a corner, the tiny
-        // section between them adds an unnecessary on-curve point. The
-        // corner already marks the structural boundary; the transition
-        // is redundant and creates a no-man's-land mini-segment.
-        // Only transitions (not corners or extrema) can be removed.
-        let keep_set: std::collections::HashSet<usize> = corner_set
-            .iter()
-            .copied()
-            .chain(extrema_set.iter().copied())
-            .collect();
-        let min_section_len: f64 = MIN_SECTION_CHORD;
-        loop {
-            let ns = pts.len();
-            if ns < 3 {
-                break;
-            }
-            let mut to_remove = None;
-            for si in 0..ns {
-                let start = pts[si];
-                let end = pts[(si + 1) % ns];
-                let dist =
-                    ((v[end].0 - v[start].0).powi(2) + (v[end].1 - v[start].1).powi(2)).sqrt();
-                if dist < min_section_len {
-                    // Prefer removing the endpoint that is a transition
-                    if !keep_set.contains(&end) {
-                        to_remove = Some((si + 1) % ns);
-                        break;
-                    } else if !keep_set.contains(&start) {
-                        to_remove = Some(si);
-                        break;
-                    }
-                }
-            }
-            match to_remove {
-                Some(idx) => {
-                    pts.remove(idx);
-                }
-                None => break,
-            }
-        }
-
-        pts
-    };
+    let mut split_points = build_split_points(
+        v, &base_splits, &corner_set, params, m,
+    );
 
     // DEBUG: print split analysis when IMG2BEZ_DEBUG_SPLITS is set
     if std::env::var("IMG2BEZ_DEBUG_SPLITS").is_ok() {
@@ -430,7 +361,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
             let max_dev = collinear_deviation(&smoothed);
             let p0 = smoothed[0];
-            let pn = *smoothed.last().unwrap();
+            let pn = smoothed[smoothed.len() - 1];
             let seg_len = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
             // For short sections (< 100 polygon units), use a more
             // permissive absolute tolerance. Bitmap tracing creates small
@@ -442,9 +373,14 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             };
             let is_line = max_dev <= line_tol;
             if debug_splits {
-                eprintln!("  Section[{}] ({:.1},{:.1})->({:.1},{:.1}) len={:.1} pts={} dev={:.2} tol={:.2} => {}",
-                    si, p0.0, p0.1, pn.0, pn.1, seg_len, segment.len(), max_dev, line_tol,
-                    if is_line { "LINE" } else { "CURVE" });
+                let kind = if is_line { "LINE" } else { "CURVE" };
+                eprintln!(
+                    "  Section[{}] ({:.1},{:.1})->({:.1},{:.1})\
+                     len={:.1} pts={} dev={:.2} tol={:.2} => {}",
+                    si, p0.0, p0.1, pn.0, pn.1,
+                    seg_len, segment.len(),
+                    max_dev, line_tol, kind,
+                );
             }
             sections.push(SectionInfo {
                 is_line,
@@ -486,6 +422,102 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     path
 }
 
+// ── Split point computation ──────────────────────────────
+
+/// Compute final split points from base splits (corners + transitions).
+///
+/// If no base splits exist, uses global contour extrema.
+/// Otherwise, finds per-segment extrema in curved sections
+/// and removes short sections between corners.
+fn build_split_points(
+    v: &[(f64, f64)],
+    base_splits: &[usize],
+    corner_set: &HashSet<usize>,
+    params: &CurveParams,
+    m: usize,
+) -> Vec<usize> {
+    if base_splits.is_empty() {
+        return find_contour_extrema(v);
+    }
+
+    // Per-segment: find extrema only in curved sections.
+    let mut pts = base_splits.to_vec();
+    let mut extrema_set: HashSet<usize> =
+        HashSet::new();
+    let ns = base_splits.len();
+    for si in 0..ns {
+        let start = base_splits[si];
+        let end = base_splits[(si + 1) % ns];
+        let segment = extract_cyclic(v, start, end, m);
+        if segment.len() <= 2 {
+            continue;
+        }
+        let smoothed = laplacian_smooth(
+            &segment, params.smooth_iterations, false,
+        );
+        let dev = collinear_deviation(&smoothed);
+        let s0 = smoothed[0];
+        let sn = smoothed[smoothed.len() - 1];
+        let slen = ((sn.0 - s0.0).powi(2)
+            + (sn.1 - s0.1).powi(2))
+        .sqrt();
+        let tol = (slen * 0.02).max(3.0);
+        if dev > tol {
+            let seg_ext =
+                find_segment_extrema(v, start, end, m);
+            for &e in &seg_ext {
+                extrema_set.insert(e);
+            }
+            pts.extend(seg_ext);
+        }
+    }
+    pts.sort_unstable();
+    pts.dedup();
+
+    // Remove transitions that create very short sections.
+    // When a curvature transition fires close to a corner,
+    // the tiny section between them adds an unnecessary
+    // on-curve point. Only transitions (not corners or
+    // extrema) can be removed.
+    let keep_set: HashSet<usize> =
+        corner_set
+            .iter()
+            .copied()
+            .chain(extrema_set.iter().copied())
+            .collect();
+    loop {
+        let ns = pts.len();
+        if ns < 3 {
+            break;
+        }
+        let mut to_remove = None;
+        for si in 0..ns {
+            let start = pts[si];
+            let end = pts[(si + 1) % ns];
+            let dist = ((v[end].0 - v[start].0).powi(2)
+                + (v[end].1 - v[start].1).powi(2))
+            .sqrt();
+            if dist < MIN_SECTION_CHORD {
+                if !keep_set.contains(&end) {
+                    to_remove = Some((si + 1) % ns);
+                    break;
+                } else if !keep_set.contains(&start) {
+                    to_remove = Some(si);
+                    break;
+                }
+            }
+        }
+        match to_remove {
+            Some(idx) => {
+                pts.remove(idx);
+            }
+            None => break,
+        }
+    }
+
+    pts
+}
+
 // ── Section classification ────────────────────────────────
 
 /// A contour section between two split points, classified as line or curve.
@@ -496,6 +528,17 @@ struct SectionInfo {
     raw: Vec<(f64, f64)>,
     /// Laplacian-smoothed polygon vertices (used for tangent estimation).
     smoothed: Vec<(f64, f64)>,
+}
+
+impl SectionInfo {
+    /// Take ownership of data, leaving empty vecs behind.
+    fn take(&mut self, is_line: bool) -> SectionInfo {
+        SectionInfo {
+            is_line,
+            raw: std::mem::take(&mut self.raw),
+            smoothed: std::mem::take(&mut self.smoothed),
+        }
+    }
 }
 
 /// Split long CURVE sections that contain an internal straight run.
@@ -517,11 +560,7 @@ fn split_long_curve_sections(
     for si in 0..sections.len() {
         if sections[si].is_line {
             new_split_points.push(split_points[si]);
-            new_sections.push(SectionInfo {
-                is_line: true,
-                raw: std::mem::take(&mut sections[si].raw),
-                smoothed: std::mem::take(&mut sections[si].smoothed),
-            });
+            new_sections.push(sections[si].take(true));
             continue;
         }
 
@@ -531,13 +570,11 @@ fn split_long_curve_sections(
         let pn = sm[n - 1];
         let chord = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
 
-        if chord < PASS15_MIN_SECTION_CHORD || n < PASS15_MIN_CURVE_POINTS + 4 {
+        if chord < PASS15_MIN_SECTION_CHORD
+            || n < PASS15_MIN_CURVE_POINTS + 4
+        {
             new_split_points.push(split_points[si]);
-            new_sections.push(SectionInfo {
-                is_line: false,
-                raw: std::mem::take(&mut sections[si].raw),
-                smoothed: std::mem::take(&mut sections[si].smoothed),
-            });
+            new_sections.push(sections[si].take(false));
             continue;
         }
 
@@ -566,11 +603,7 @@ fn split_long_curve_sections(
 
         if best_chord < PASS15_MIN_STRAIGHT_CHORD {
             new_split_points.push(split_points[si]);
-            new_sections.push(SectionInfo {
-                is_line: false,
-                raw: std::mem::take(&mut sections[si].raw),
-                smoothed: std::mem::take(&mut sections[si].smoothed),
-            });
+            new_sections.push(sections[si].take(false));
             continue;
         }
 
@@ -593,11 +626,7 @@ fn split_long_curve_sections(
         .sqrt();
         if adj_chord < PASS15_MIN_STRAIGHT_CHORD {
             new_split_points.push(split_points[si]);
-            new_sections.push(SectionInfo {
-                is_line: false,
-                raw: std::mem::take(&mut sections[si].raw),
-                smoothed: std::mem::take(&mut sections[si].smoothed),
-            });
+            new_sections.push(sections[si].take(false));
             continue;
         }
 
@@ -765,64 +794,37 @@ fn fit_single_cubic(
     let u0 = snap_tangent_hv(u0_raw);
     let u1 = snap_tangent_hv(u1_raw);
 
-    // Optimize handle lengths to best fit the raw (unsmoothed) polyline.
-    // Grid search over asymmetric (sa, sb) scale factors, then multi-pass
-    // refinement. Minimizes max nearest-point distance (Hausdorff).
-    // Hard constraint: handles must be within MAX_HANDLE_RATIO of each other.
-    let chord = ((p3.x - p0.x).powi(2) + (p3.y - p0.y).powi(2)).sqrt();
+    // Optimize handle lengths to best fit the raw (unsmoothed)
+    // polyline. Grid search over (sa, sb) scale factors, then
+    // multi-pass refinement. Minimizes Hausdorff distance.
+    let chord = ((p3.x - p0.x).powi(2)
+        + (p3.y - p0.y).powi(2))
+    .sqrt();
 
-    let ratio_ok = |sa: f64, sb: f64| -> bool { sa.max(sb) / sa.min(sb) <= MAX_HANDLE_RATIO };
+    // Coarse grid: 0.10 to 0.70 in steps of 0.075
+    let (mut best_sa, mut best_sb, mut best_err) =
+        grid_search_handles(
+            p0, u0, p3, u1, chord, raw_points,
+            0.10, 0.70, 0.10, 0.70, 0.075,
+            0.33, 0.33, f64::MAX,
+        );
 
-    // Coarse grid: 9 values from 0.10 to 0.70
-    let scales: &[f64] = &[0.10, 0.175, 0.25, 0.325, 0.40, 0.475, 0.55, 0.625, 0.70];
-    let mut best_sa = 0.33_f64;
-    let mut best_sb = 0.33_f64;
-    let mut best_err = f64::MAX;
-
-    for &sa in scales {
-        for &sb in scales {
-            if !ratio_ok(sa, sb) {
-                continue;
-            }
-            let a = chord * sa;
-            let b = chord * sb;
-            let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
-            let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
-            let err = max_polyline_deviation(p0, p1, p2, p3, raw_points);
-            if err < best_err {
-                best_err = err;
-                best_sa = sa;
-                best_sb = sb;
-            }
-        }
-    }
-
-    // Three-pass refinement: medium → fine → ultra-fine
-    for &(step, range) in &[(0.008, 0.05), (0.002, 0.012), (0.0005, 0.003)] {
-        let sa_lo = (best_sa - range).max(0.05);
-        let sa_hi = (best_sa + range).min(0.80);
-        let sb_lo = (best_sb - range).max(0.05);
-        let sb_hi = (best_sb + range).min(0.80);
-        let mut sa = sa_lo;
-        while sa <= sa_hi + 1e-9 {
-            let mut sb = sb_lo;
-            while sb <= sb_hi + 1e-9 {
-                if ratio_ok(sa, sb) {
-                    let a = chord * sa;
-                    let b = chord * sb;
-                    let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
-                    let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
-                    let err = max_polyline_deviation(p0, p1, p2, p3, raw_points);
-                    if err < best_err {
-                        best_err = err;
-                        best_sa = sa;
-                        best_sb = sb;
-                    }
-                }
-                sb += step;
-            }
-            sa += step;
-        }
+    // Three-pass refinement: medium, fine, ultra-fine
+    for &(step, range) in &[
+        (0.008, 0.05),
+        (0.002, 0.012),
+        (0.0005, 0.003),
+    ] {
+        (best_sa, best_sb, best_err) =
+            grid_search_handles(
+                p0, u0, p3, u1, chord, raw_points,
+                (best_sa - range).max(0.05),
+                (best_sa + range).min(0.80),
+                (best_sb - range).max(0.05),
+                (best_sb + range).min(0.80),
+                step,
+                best_sa, best_sb, best_err,
+            );
     }
 
     // Build final control points and apply magic triangle clamping.
@@ -849,15 +851,13 @@ fn fit_single_cubic(
             u0.x, u0.y, u1.x, u1.y
         );
         eprintln!(
-            "    sa={:.4} sb={:.4} h1={:.1} ({:.0}%) h2={:.1} ({:.0}%) ratio={:.2} err={:.2}",
-            best_sa,
-            best_sb,
-            h1,
-            h1 / chord * 100.0,
-            h2,
-            h2 / chord * 100.0,
-            ratio,
-            best_err
+            "    sa={:.4} sb={:.4} ratio={:.2} err={:.2}",
+            best_sa, best_sb, ratio, best_err,
+        );
+        eprintln!(
+            "    h1={:.1} ({:.0}%) h2={:.1} ({:.0}%)",
+            h1, h1 / chord * 100.0,
+            h2, h2 / chord * 100.0,
         );
     }
 
@@ -867,6 +867,57 @@ fn fit_single_cubic(
     path
 }
 
+/// Search a grid of (sa, sb) handle-length factors for the
+/// combination that minimizes Hausdorff distance to the raw
+/// polyline. Returns updated (best_sa, best_sb, best_err).
+#[allow(clippy::too_many_arguments)]
+fn grid_search_handles(
+    p0: Point,
+    u0: Point,
+    p3: Point,
+    u1: Point,
+    chord: f64,
+    raw_points: &[(f64, f64)],
+    sa_lo: f64,
+    sa_hi: f64,
+    sb_lo: f64,
+    sb_hi: f64,
+    step: f64,
+    mut best_sa: f64,
+    mut best_sb: f64,
+    mut best_err: f64,
+) -> (f64, f64, f64) {
+    let mut sa = sa_lo;
+    while sa <= sa_hi + 1e-9 {
+        let mut sb = sb_lo;
+        while sb <= sb_hi + 1e-9 {
+            if sa.max(sb) / sa.min(sb) <= MAX_HANDLE_RATIO {
+                let a = chord * sa;
+                let b = chord * sb;
+                let p1 = Point::new(
+                    p0.x + u0.x * a,
+                    p0.y + u0.y * a,
+                );
+                let p2 = Point::new(
+                    p3.x - u1.x * b,
+                    p3.y - u1.y * b,
+                );
+                let err = max_polyline_deviation(
+                    p0, p1, p2, p3, raw_points,
+                );
+                if err < best_err {
+                    best_err = err;
+                    best_sa = sa;
+                    best_sb = sb;
+                }
+            }
+            sb += step;
+        }
+        sa += step;
+    }
+    (best_sa, best_sb, best_err)
+}
+
 /// Clamp control points so they stay within the magic triangle.
 ///
 /// The magic triangle is formed by the two on-curve points and the
@@ -874,7 +925,12 @@ fn fit_single_cubic(
 /// not extend past this intersection point (measured along its own
 /// direction). If a handle overshoots, it is shortened to 95% of the
 /// distance to the intersection.
-fn clamp_to_magic_triangle(p0: Point, cp1: &mut Point, cp2: &mut Point, p3: Point) {
+fn clamp_to_magic_triangle(
+    p0: Point,
+    cp1: &mut Point,
+    cp2: &mut Point,
+    p3: Point,
+) {
     let u0 = Point::new(cp1.x - p0.x, cp1.y - p0.y);
     let u1 = Point::new(cp2.x - p3.x, cp2.y - p3.y);
 
@@ -936,15 +992,15 @@ fn max_polyline_deviation(
     let mut samples = [(0.0_f64, 0.0_f64); CURVE_DEVIATION_SAMPLES + 1];
     for (i, sample) in samples.iter_mut().enumerate() {
         let t = i as f64 / CURVE_DEVIATION_SAMPLES as f64;
-        let mt = 1.0 - t;
+        let mt = 1. - t;
         *sample = (
             mt * mt * mt * p0.x
-                + 3.0 * mt * mt * t * p1.x
-                + 3.0 * mt * t * t * p2.x
+                + 3. * mt * mt * t * p1.x
+                + 3. * mt * t * t * p2.x
                 + t * t * t * p3.x,
             mt * mt * mt * p0.y
-                + 3.0 * mt * mt * t * p1.y
-                + 3.0 * mt * t * t * p2.y
+                + 3. * mt * mt * t * p1.y
+                + 3. * mt * t * t * p2.y
                 + t * t * t * p3.y,
         );
     }
@@ -999,8 +1055,8 @@ fn laplacian_smooth(points: &[(f64, f64)], iterations: usize, closed: bool) -> V
         for i in start..end {
             let p = if i == 0 { n - 1 } else { i - 1 };
             let nx = (i + 1) % n;
-            pts[i].0 = (prev[p].0 + prev[i].0 + prev[nx].0) / 3.0;
-            pts[i].1 = (prev[p].1 + prev[i].1 + prev[nx].1) / 3.0;
+            pts[i].0 = (prev[p].0 + prev[i].0 + prev[nx].0) / 3.;
+            pts[i].1 = (prev[p].1 + prev[i].1 + prev[nx].1) / 3.;
         }
     }
     pts
@@ -1185,6 +1241,7 @@ fn snap_and_merge_lines(path: &mut BezPath) {
 }
 
 /// Get the cursor position before element at index `i`.
+#[inline]
 fn cursor_before(els: &[PathEl], i: usize) -> Point {
     for j in (0..i).rev() {
         match els[j] {
@@ -1196,6 +1253,7 @@ fn cursor_before(els: &[PathEl], i: usize) -> Point {
 }
 
 /// Perpendicular distance from point `p` to the line through `a` and `b`.
+#[inline]
 fn point_line_dist(p: Point, a: Point, b: Point) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
@@ -1213,14 +1271,14 @@ fn merge_nearby_preserve_corners(
     sorted: Vec<usize>,
     min_gap: usize,
     total: usize,
-    corners: &std::collections::HashSet<usize>,
+    corners: &HashSet<usize>,
 ) -> Vec<usize> {
     if sorted.len() <= 1 {
         return sorted;
     }
     let mut result = vec![sorted[0]];
     for &idx in &sorted[1..] {
-        let gap = idx - result.last().unwrap();
+        let gap = idx - result[result.len() - 1];
         if corners.contains(&idx) {
             // Always keep corners, even if close to previous point.
             result.push(idx);
@@ -1231,7 +1289,7 @@ fn merge_nearby_preserve_corners(
     }
     // Check wrap-around: only drop last if it's NOT a corner.
     if result.len() > 1 {
-        let last = *result.last().unwrap();
+        let last = result[result.len() - 1];
         let first = result[0];
         if total - last + first <= min_gap && !corners.contains(&last) {
             result.pop();
@@ -1310,15 +1368,16 @@ fn compute_alpha(vi: (f64, f64), vj: (f64, f64), vk: (f64, f64)) -> f64 {
     let ddenom = dorth.1 * (vk.0 - vi.0) - dorth.0 * (vk.1 - vi.1);
 
     if ddenom.abs() < 1e-10 {
-        return 4.0 / 3.0; // degenerate: treat as very smooth
+        return 4. / 3.; // degenerate: treat as very smooth
     }
 
     let dd = (dpara / ddenom).abs();
-    let alpha = if dd > 1.0 { 1.0 - 1.0 / dd } else { 0.0 };
+    let alpha = if dd > 1. { 1. - 1. / dd } else { 0. };
     alpha / 0.75
 }
 
 /// 90-degree CCW rotation of direction from p0 to p2, snapped to cardinal.
+#[inline]
 fn dorth_infty(p0: (f64, f64), p2: (f64, f64)) -> (f64, f64) {
     let dx = p2.0 - p0.0;
     let dy = p2.1 - p0.1;
@@ -1326,12 +1385,93 @@ fn dorth_infty(p0: (f64, f64), p2: (f64, f64)) -> (f64, f64) {
 }
 
 /// Sign function for f64.
+#[inline]
 fn fsign(x: f64) -> f64 {
-    if x > 0.0 {
-        1.0
-    } else if x < 0.0 {
-        -1.0
+    if x > 0. {
+        1.
+    } else if x < 0. {
+        -1.
     } else {
-        0.0
+        0.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kurbo::PathEl;
+
+    #[test]
+    fn rectangle_polygon_all_lines() {
+        let poly = Polygon {
+            vertices: vec![
+                (0.0, 0.0),
+                (100.0, 0.0),
+                (100.0, 100.0),
+                (0.0, 100.0),
+            ],
+            sign: 1,
+        };
+        let path = polygon_to_bezpath(&poly, &CurveParams::default());
+        for el in path.elements() {
+            match el {
+                PathEl::MoveTo(_) | PathEl::LineTo(_) | PathEl::ClosePath => {}
+                PathEl::CurveTo(..) | PathEl::QuadTo(..) => {
+                    panic!("Rectangle polygon should produce only lines, found a curve");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_path_is_closed() {
+        let poly = Polygon {
+            vertices: vec![
+                (0.0, 0.0),
+                (100.0, 0.0),
+                (100.0, 100.0),
+                (0.0, 100.0),
+            ],
+            sign: 1,
+        };
+        let path = polygon_to_bezpath(&poly, &CurveParams::default());
+        let elements = path.elements();
+        assert!(!elements.is_empty(), "Path should not be empty");
+        assert!(
+            matches!(elements[0], PathEl::MoveTo(_)),
+            "First element should be MoveTo"
+        );
+        assert!(
+            matches!(elements.last().unwrap(), PathEl::ClosePath),
+            "Last element should be ClosePath"
+        );
+    }
+
+    #[test]
+    fn smooth_polygon_produces_curves() {
+        // Create a polygon with 48 vertices forming a circle (radius 200).
+        // 48 vertices gives alpha ≈ 0.46 per vertex (< alphamax 1.0),
+        // so vertices are smooth, not corners.
+        let n = 48;
+        let r = 200.0;
+        let vertices: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let angle = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
+                (r + r * angle.cos(), r + r * angle.sin())
+            })
+            .collect();
+        let poly = Polygon {
+            vertices,
+            sign: 1,
+        };
+        let path = polygon_to_bezpath(&poly, &CurveParams::default());
+        let has_curve = path
+            .elements()
+            .iter()
+            .any(|el| matches!(el, PathEl::CurveTo(..)));
+        assert!(
+            has_curve,
+            "Smooth circular polygon should produce at least one CurveTo"
+        );
     }
 }

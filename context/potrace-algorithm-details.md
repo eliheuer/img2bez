@@ -1,6 +1,6 @@
-# Potrace Algorithm — Precise Implementation Details
+# Potrace Algorithm — Pseudocode Reference
 
-Derived from the C source code (`trace.c`). Reference for Rust reimplementation.
+Derived from Peter Selinger's C source (`trace.c`). Used as the reference for the Rust implementation in `src/vectorize/polygon.rs` and `src/vectorize/curve.rs`.
 
 ## Data Structures
 
