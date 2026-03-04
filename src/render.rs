@@ -481,12 +481,8 @@ pub fn raster_compare(
     };
 
     // Render traced (center-aligned) and reference.
-    let traced_pm = render_paths_to_pixmap(
-        traced_paths, canvas_size, traced_transform,
-    );
-    let ref_pm = render_paths_to_pixmap(
-        reference_paths, canvas_size, ref_transform,
-    );
+    let traced_pm = render_paths_to_pixmap(traced_paths, canvas_size, traced_transform);
+    let ref_pm = render_paths_to_pixmap(reference_paths, canvas_size, ref_transform);
 
     // Compare pixels.
     let total = (canvas_size * canvas_size) as usize;
@@ -494,7 +490,8 @@ pub fn raster_compare(
     let mut traced_only: u64 = 0;
     let mut ref_only: u64 = 0;
 
-    let mut diff_pm = tiny_skia::Pixmap::new(canvas_size, canvas_size).expect("non-zero canvas size");
+    let mut diff_pm =
+        tiny_skia::Pixmap::new(canvas_size, canvas_size).expect("non-zero canvas size");
     diff_pm.fill(tiny_skia::Color::from_rgba8(32, 32, 32, 255));
 
     for i in 0..total {

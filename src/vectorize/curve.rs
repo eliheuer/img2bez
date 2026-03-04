@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use kurbo::{fit_to_bezpath_opt, simplify::SimplifyBezPath, BezPath, PathEl, Point};
+use kurbo::{BezPath, PathEl, Point, fit_to_bezpath_opt, simplify::SimplifyBezPath};
 
 use super::polygon::Polygon;
 
@@ -290,9 +290,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // Merge only non-corner transitions that are at the same vertex.
     base_splits = merge_nearby_preserve_corners(base_splits, 1, m, &corner_set);
 
-    let mut split_points = build_split_points(
-        v, &base_splits, &corner_set, params, m,
-    );
+    let mut split_points = build_split_points(v, &base_splits, &corner_set, params, m);
 
     // DEBUG: print split analysis when IMG2BEZ_DEBUG_SPLITS is set
     if std::env::var("IMG2BEZ_DEBUG_SPLITS").is_ok() {
@@ -377,9 +375,16 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
                 eprintln!(
                     "  Section[{}] ({:.1},{:.1})->({:.1},{:.1})\
                      len={:.1} pts={} dev={:.2} tol={:.2} => {}",
-                    si, p0.0, p0.1, pn.0, pn.1,
-                    seg_len, segment.len(),
-                    max_dev, line_tol, kind,
+                    si,
+                    p0.0,
+                    p0.1,
+                    pn.0,
+                    pn.1,
+                    seg_len,
+                    segment.len(),
+                    max_dev,
+                    line_tol,
+                    kind,
                 );
             }
             sections.push(SectionInfo {
@@ -442,8 +447,7 @@ fn build_split_points(
 
     // Per-segment: find extrema only in curved sections.
     let mut pts = base_splits.to_vec();
-    let mut extrema_set: HashSet<usize> =
-        HashSet::new();
+    let mut extrema_set: HashSet<usize> = HashSet::new();
     let ns = base_splits.len();
     for si in 0..ns {
         let start = base_splits[si];
@@ -452,19 +456,14 @@ fn build_split_points(
         if segment.len() <= 2 {
             continue;
         }
-        let smoothed = laplacian_smooth(
-            &segment, params.smooth_iterations, false,
-        );
+        let smoothed = laplacian_smooth(&segment, params.smooth_iterations, false);
         let dev = collinear_deviation(&smoothed);
         let s0 = smoothed[0];
         let sn = smoothed[smoothed.len() - 1];
-        let slen = ((sn.0 - s0.0).powi(2)
-            + (sn.1 - s0.1).powi(2))
-        .sqrt();
+        let slen = ((sn.0 - s0.0).powi(2) + (sn.1 - s0.1).powi(2)).sqrt();
         let tol = (slen * 0.02).max(3.0);
         if dev > tol {
-            let seg_ext =
-                find_segment_extrema(v, start, end, m);
+            let seg_ext = find_segment_extrema(v, start, end, m);
             for &e in &seg_ext {
                 extrema_set.insert(e);
             }
@@ -479,12 +478,11 @@ fn build_split_points(
     // the tiny section between them adds an unnecessary
     // on-curve point. Only transitions (not corners or
     // extrema) can be removed.
-    let keep_set: HashSet<usize> =
-        corner_set
-            .iter()
-            .copied()
-            .chain(extrema_set.iter().copied())
-            .collect();
+    let keep_set: HashSet<usize> = corner_set
+        .iter()
+        .copied()
+        .chain(extrema_set.iter().copied())
+        .collect();
     loop {
         let ns = pts.len();
         if ns < 3 {
@@ -494,9 +492,7 @@ fn build_split_points(
         for si in 0..ns {
             let start = pts[si];
             let end = pts[(si + 1) % ns];
-            let dist = ((v[end].0 - v[start].0).powi(2)
-                + (v[end].1 - v[start].1).powi(2))
-            .sqrt();
+            let dist = ((v[end].0 - v[start].0).powi(2) + (v[end].1 - v[start].1).powi(2)).sqrt();
             if dist < MIN_SECTION_CHORD {
                 if !keep_set.contains(&end) {
                     to_remove = Some((si + 1) % ns);
@@ -570,9 +566,7 @@ fn split_long_curve_sections(
         let pn = sm[n - 1];
         let chord = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
 
-        if chord < PASS15_MIN_SECTION_CHORD
-            || n < PASS15_MIN_CURVE_POINTS + 4
-        {
+        if chord < PASS15_MIN_SECTION_CHORD || n < PASS15_MIN_CURVE_POINTS + 4 {
             new_split_points.push(split_points[si]);
             new_sections.push(sections[si].take(false));
             continue;
@@ -797,34 +791,44 @@ fn fit_single_cubic(
     // Optimize handle lengths to best fit the raw (unsmoothed)
     // polyline. Grid search over (sa, sb) scale factors, then
     // multi-pass refinement. Minimizes Hausdorff distance.
-    let chord = ((p3.x - p0.x).powi(2)
-        + (p3.y - p0.y).powi(2))
-    .sqrt();
+    let chord = ((p3.x - p0.x).powi(2) + (p3.y - p0.y).powi(2)).sqrt();
 
     // Coarse grid: 0.10 to 0.70 in steps of 0.075
-    let (mut best_sa, mut best_sb, mut best_err) =
-        grid_search_handles(
-            p0, u0, p3, u1, chord, raw_points,
-            0.10, 0.70, 0.10, 0.70, 0.075,
-            0.33, 0.33, f64::MAX,
-        );
+    let (mut best_sa, mut best_sb, mut best_err) = grid_search_handles(
+        p0,
+        u0,
+        p3,
+        u1,
+        chord,
+        raw_points,
+        0.10,
+        0.70,
+        0.10,
+        0.70,
+        0.075,
+        0.33,
+        0.33,
+        f64::MAX,
+    );
 
     // Three-pass refinement: medium, fine, ultra-fine
-    for &(step, range) in &[
-        (0.008, 0.05),
-        (0.002, 0.012),
-        (0.0005, 0.003),
-    ] {
-        (best_sa, best_sb, best_err) =
-            grid_search_handles(
-                p0, u0, p3, u1, chord, raw_points,
-                (best_sa - range).max(0.05),
-                (best_sa + range).min(0.80),
-                (best_sb - range).max(0.05),
-                (best_sb + range).min(0.80),
-                step,
-                best_sa, best_sb, best_err,
-            );
+    for &(step, range) in &[(0.008, 0.05), (0.002, 0.012), (0.0005, 0.003)] {
+        (best_sa, best_sb, best_err) = grid_search_handles(
+            p0,
+            u0,
+            p3,
+            u1,
+            chord,
+            raw_points,
+            (best_sa - range).max(0.05),
+            (best_sa + range).min(0.80),
+            (best_sb - range).max(0.05),
+            (best_sb + range).min(0.80),
+            step,
+            best_sa,
+            best_sb,
+            best_err,
+        );
     }
 
     // Build final control points and apply magic triangle clamping.
@@ -856,8 +860,10 @@ fn fit_single_cubic(
         );
         eprintln!(
             "    h1={:.1} ({:.0}%) h2={:.1} ({:.0}%)",
-            h1, h1 / chord * 100.0,
-            h2, h2 / chord * 100.0,
+            h1,
+            h1 / chord * 100.0,
+            h2,
+            h2 / chord * 100.0,
         );
     }
 
@@ -894,17 +900,9 @@ fn grid_search_handles(
             if sa.max(sb) / sa.min(sb) <= MAX_HANDLE_RATIO {
                 let a = chord * sa;
                 let b = chord * sb;
-                let p1 = Point::new(
-                    p0.x + u0.x * a,
-                    p0.y + u0.y * a,
-                );
-                let p2 = Point::new(
-                    p3.x - u1.x * b,
-                    p3.y - u1.y * b,
-                );
-                let err = max_polyline_deviation(
-                    p0, p1, p2, p3, raw_points,
-                );
+                let p1 = Point::new(p0.x + u0.x * a, p0.y + u0.y * a);
+                let p2 = Point::new(p3.x - u1.x * b, p3.y - u1.y * b);
+                let err = max_polyline_deviation(p0, p1, p2, p3, raw_points);
                 if err < best_err {
                     best_err = err;
                     best_sa = sa;
@@ -925,12 +923,7 @@ fn grid_search_handles(
 /// not extend past this intersection point (measured along its own
 /// direction). If a handle overshoots, it is shortened to 95% of the
 /// distance to the intersection.
-fn clamp_to_magic_triangle(
-    p0: Point,
-    cp1: &mut Point,
-    cp2: &mut Point,
-    p3: Point,
-) {
+fn clamp_to_magic_triangle(p0: Point, cp1: &mut Point, cp2: &mut Point, p3: Point) {
     let u0 = Point::new(cp1.x - p0.x, cp1.y - p0.y);
     let u1 = Point::new(cp2.x - p3.x, cp2.y - p3.y);
 
@@ -1404,12 +1397,7 @@ mod tests {
     #[test]
     fn rectangle_polygon_all_lines() {
         let poly = Polygon {
-            vertices: vec![
-                (0.0, 0.0),
-                (100.0, 0.0),
-                (100.0, 100.0),
-                (0.0, 100.0),
-            ],
+            vertices: vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
             sign: 1,
         };
         let path = polygon_to_bezpath(&poly, &CurveParams::default());
@@ -1426,12 +1414,7 @@ mod tests {
     #[test]
     fn output_path_is_closed() {
         let poly = Polygon {
-            vertices: vec![
-                (0.0, 0.0),
-                (100.0, 0.0),
-                (100.0, 100.0),
-                (0.0, 100.0),
-            ],
+            vertices: vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
             sign: 1,
         };
         let path = polygon_to_bezpath(&poly, &CurveParams::default());
@@ -1460,10 +1443,7 @@ mod tests {
                 (r + r * angle.cos(), r + r * angle.sin())
             })
             .collect();
-        let poly = Polygon {
-            vertices,
-            sign: 1,
-        };
+        let poly = Polygon { vertices, sign: 1 };
         let path = polygon_to_bezpath(&poly, &CurveParams::default());
         let has_curve = path
             .elements()

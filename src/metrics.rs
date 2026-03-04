@@ -49,11 +49,7 @@ pub fn advance_from_bounds(paths: &[BezPath], rsb: f64) -> f64 {
     for path in paths {
         max_x = max_x.max(path.bounding_box().x1);
     }
-    if max_x == f64::MIN {
-        0.0
-    } else {
-        max_x + rsb
-    }
+    if max_x == f64::MIN { 0.0 } else { max_x + rsb }
 }
 
 /// Translate all points in a BezPath by (dx, dy).

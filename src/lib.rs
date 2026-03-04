@@ -87,10 +87,7 @@ pub struct TraceResult {
 ///
 /// Pipeline: pixel-edge contour extraction on the dual grid,
 /// optimal polygon approximation via DP, and alpha-based curve generation.
-pub fn trace(
-    image_path: &Path,
-    config: &TracingConfig,
-) -> Result<TraceResult, TraceError> {
+pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, TraceError> {
     let t_start = Instant::now();
 
     // ── Load & threshold ──────────────────────────────────
@@ -194,11 +191,16 @@ pub fn trace(
     if config.verbose {
         eprintln!(
             "  Result      {} contours ({} outer, {} counter)",
-            contour_types.len(), n_outer, n_counter,
+            contour_types.len(),
+            n_outer,
+            n_counter,
         );
         eprintln!(
             "              {} points ({} on-curve) \u{00b7} width {}  ({}ms)",
-            on + off, on, advance_width as i64, elapsed,
+            on + off,
+            on,
+            advance_width as i64,
+            elapsed,
         );
     }
 

@@ -3,9 +3,9 @@
 use kurbo::{BezPath, PathEl};
 use norad::{Contour, ContourPoint, Glyph, PointType};
 
+use crate::TraceResult;
 use crate::config::TracingConfig;
 use crate::error::TraceError;
-use crate::TraceResult;
 
 /// Convert a `TraceResult` to a `norad::Glyph`.
 pub fn to_glyph(
@@ -38,7 +38,7 @@ pub fn to_contour(path: &BezPath) -> Result<Contour, TraceError> {
         _ => {
             return Err(TraceError::InvalidPath(
                 "path must start with MoveTo".into(),
-            ))
+            ));
         }
     };
 
@@ -61,7 +61,7 @@ pub fn to_contour(path: &BezPath) -> Result<Contour, TraceError> {
             }
             PathEl::ClosePath => {}
             PathEl::MoveTo(_) => {
-                return Err(TraceError::InvalidPath("unexpected MoveTo mid-path".into()))
+                return Err(TraceError::InvalidPath("unexpected MoveTo mid-path".into()));
             }
         }
     }

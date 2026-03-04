@@ -3,7 +3,7 @@
 //! Ensures outer contours wind CCW and counters (holes) wind CW,
 //! which is the standard convention for TrueType/OpenType fonts.
 
-use kurbo::{flatten, BezPath, PathEl, Point};
+use kurbo::{BezPath, PathEl, Point, flatten};
 
 use crate::geom::signed_area;
 
@@ -179,7 +179,10 @@ mod tests {
         let result = fix_directions(&[path]);
         assert_eq!(result.len(), 1);
         let area_after = signed_area(&result[0]);
-        assert!(area_after > 0.0, "Output should still be CCW (positive area)");
+        assert!(
+            area_after > 0.0,
+            "Output should still be CCW (positive area)"
+        );
     }
 
     #[test]

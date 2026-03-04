@@ -9,8 +9,8 @@ use std::path::Path;
 
 use kurbo::{BezPath, ParamCurve, ParamCurveArclen, PathEl, PathSeg, Point, Rect, Shape};
 
-use crate::error::TraceError;
 use crate::TraceResult;
+use crate::error::TraceError;
 
 /// Number of sample points per path set for shape distance computation.
 /// Higher values give more accurate Hausdorff/mean distance but cost O(n²).

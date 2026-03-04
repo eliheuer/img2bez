@@ -50,7 +50,10 @@ mod tests {
         ccw.line_to(Point::new(100.0, 100.0));
         ccw.line_to(Point::new(0.0, 100.0));
         ccw.push(PathEl::ClosePath);
-        assert!(signed_area(&ccw) > 0.0, "CCW square should have positive area");
+        assert!(
+            signed_area(&ccw) > 0.0,
+            "CCW square should have positive area"
+        );
 
         // CW square: reverse
         let mut cw = BezPath::new();
@@ -59,6 +62,9 @@ mod tests {
         cw.line_to(Point::new(100.0, 100.0));
         cw.line_to(Point::new(100.0, 0.0));
         cw.push(PathEl::ClosePath);
-        assert!(signed_area(&cw) < 0.0, "CW square should have negative area");
+        assert!(
+            signed_area(&cw) < 0.0,
+            "CW square should have negative area"
+        );
     }
 }

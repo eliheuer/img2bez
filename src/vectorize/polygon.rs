@@ -288,13 +288,7 @@ fn pivot_at_violation(
 ///
 /// Returns polygon vertex indices into the original path.
 #[allow(clippy::needless_range_loop)]
-fn best_polygon(
-    pt: &[(i32, i32)],
-    lon: &[usize],
-    sums: &[Sums],
-    x0: i32,
-    y0: i32,
-) -> Vec<usize> {
+fn best_polygon(pt: &[(i32, i32)], lon: &[usize], sums: &[Sums], x0: i32, y0: i32) -> Vec<usize> {
     let n = pt.len();
 
     // clip0[i] = farthest vertex reachable from i (clipping interval).
@@ -409,14 +403,7 @@ fn best_polygon(
 /// ```
 ///
 /// All expectations are computed in O(1) via prefix sums.
-fn penalty3(
-    pt: &[(i32, i32)],
-    sums: &[Sums],
-    x0: i32,
-    y0: i32,
-    i: usize,
-    j: usize,
-) -> f64 {
+fn penalty3(pt: &[(i32, i32)], sums: &[Sums], x0: i32, y0: i32, i: usize, j: usize) -> f64 {
     let n = sums.len() - 1;
     let jn = j % n; // cyclic index into pt[]
 
@@ -567,8 +554,7 @@ fn point_slope(
     let c_cov = (y2 - y * y / k) / k;
 
     // Largest eigenvalue's eigenvector = direction of maximum variance.
-    let discriminant =
-        ((a_cov - c_cov).powi(2) + 4.0 * b_cov * b_cov).sqrt();
+    let discriminant = ((a_cov - c_cov).powi(2) + 4.0 * b_cov * b_cov).sqrt();
     let lambda2 = (a_cov + c_cov + discriminant) / 2.0;
 
     let a2 = a_cov - lambda2;
@@ -691,28 +677,32 @@ fn constrain_to_box(q: &[[f64; 3]; 3], center: (f64, f64)) -> (f64, f64) {
 /// per axis to model the half-pixel envelope around the line.
 fn constraint_offsets(cur: (i32, i32)) -> ((i32, i32), (i32, i32)) {
     let off0 = (
-        cur.0 + if cur.1 > 0 || (cur.1 == 0 && cur.0 < 0) {
-            1
-        } else {
-            -1
-        },
-        cur.1 + if cur.0 < 0 || (cur.0 == 0 && cur.1 < 0) {
-            1
-        } else {
-            -1
-        },
+        cur.0
+            + if cur.1 > 0 || (cur.1 == 0 && cur.0 < 0) {
+                1
+            } else {
+                -1
+            },
+        cur.1
+            + if cur.0 < 0 || (cur.0 == 0 && cur.1 < 0) {
+                1
+            } else {
+                -1
+            },
     );
     let off1 = (
-        cur.0 + if cur.1 < 0 || (cur.1 == 0 && cur.0 < 0) {
-            1
-        } else {
-            -1
-        },
-        cur.1 + if cur.0 > 0 || (cur.0 == 0 && cur.1 < 0) {
-            1
-        } else {
-            -1
-        },
+        cur.0
+            + if cur.1 < 0 || (cur.1 == 0 && cur.0 < 0) {
+                1
+            } else {
+                -1
+            },
+        cur.1
+            + if cur.0 > 0 || (cur.0 == 0 && cur.1 < 0) {
+                1
+            } else {
+                -1
+            },
     );
     (off0, off1)
 }
@@ -750,11 +740,7 @@ fn pmod_signed(a: isize, n: isize) -> usize {
 /// Floor division for signed values (rounds toward negative infinity).
 #[inline]
 fn floordiv(a: i64, b: i64) -> i64 {
-    if a >= 0 {
-        a / b
-    } else {
-        -1 - (-1 - a) / b
-    }
+    if a >= 0 { a / b } else { -1 - (-1 - a) / b }
 }
 
 /// Check if b is in the cyclic interval [a, c) mod n.
