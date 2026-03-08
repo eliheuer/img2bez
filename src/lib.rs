@@ -37,6 +37,7 @@ mod cleanup;
 mod config;
 mod geom;
 mod metrics;
+pub mod refit;
 mod vectorize;
 
 pub mod error;
