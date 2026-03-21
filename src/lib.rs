@@ -171,7 +171,8 @@ pub fn trace(image_path: &Path, config: &TracingConfig) -> Result<TraceResult, T
             }
         }
     }
-    let (paths, reposition_shift) = metrics::reposition(&paths, config.lsb, config.grid);
+    let (paths, reposition_shift) =
+        metrics::reposition(&paths, config.lsb, config.grid, config.y_offset);
     if config.verbose {
         eprintln!(
             "  Reposition  shift=({:.1}, {:.1})  lsb={:.1}",

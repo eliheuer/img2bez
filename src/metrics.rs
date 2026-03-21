@@ -4,12 +4,22 @@ use kurbo::{Affine, BezPath, Shape, Vec2};
 
 /// Shift paths so bottom sits on baseline, left at LSB.
 ///
+/// When `y_offset` is non-zero the caller has already placed the glyph
+/// in font-unit coordinates with an explicit baseline; only the x
+/// (LSB) shift is applied.  When `y_offset` is zero the glyph is
+/// assumed to start at the image bottom and needs shifting up to y=0.
+///
 /// When `grid > 0`, shifts are rounded to the grid so coordinates
 /// that were on-grid before repositioning stay on-grid after.
 ///
 /// Returns `(repositioned_paths, (dx, dy))` where (dx, dy) is the
 /// translation that was applied.
-pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> (Vec<BezPath>, (f64, f64)) {
+pub fn reposition(
+    paths: &[BezPath],
+    lsb: f64,
+    grid: i32,
+    y_offset: f64,
+) -> (Vec<BezPath>, (f64, f64)) {
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
     // Use on-curve point extremes (not tight bbox) to avoid fractional shifts.
@@ -31,7 +41,9 @@ pub fn reposition(paths: &[BezPath], lsb: f64, grid: i32) -> (Vec<BezPath>, (f64
         return (paths.to_vec(), (0.0, 0.0));
     }
     let mut dx = lsb - min_x;
-    let mut dy = -min_y;
+    // Only auto-shift y when no explicit y_offset was given.
+    // With y_offset set, the glyph is already in the correct font position.
+    let mut dy = if y_offset == 0.0 { -min_y } else { 0.0 };
     if grid > 0 {
         let g = grid as f64;
         dx = (dx / g).round() * g;
