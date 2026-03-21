@@ -30,7 +30,7 @@ const SHORT_SECTION_THRESHOLD: f64 = 100.0;
 
 /// Permissive straightness tolerance (as fraction of chord length) for
 /// sections shorter than `SHORT_SECTION_THRESHOLD`.
-const SHORT_SECTION_TOLERANCE: f64 = 0.25;
+const SHORT_SECTION_TOLERANCE: f64 = 0.15;
 
 /// Chord length above which a curved section is split at its maximum-deviation
 /// vertex. Prevents single cubics from being forced to represent large S-curves
@@ -372,7 +372,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             let line_tol = if seg_len < SHORT_SECTION_THRESHOLD {
                 (seg_len * SHORT_SECTION_TOLERANCE).max(3.0)
             } else {
-                (seg_len * 0.035).max(3.0)
+                (seg_len * 0.04).max(3.0)
             };
             let is_line = max_dev <= line_tol;
             if debug_splits {
