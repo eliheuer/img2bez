@@ -21,6 +21,8 @@ import argparse
 import os
 import plistlib
 import sys
+import struct
+import zlib
 
 
 def get_font_metrics(ufo_path):
@@ -48,6 +50,75 @@ def get_glif_path(ufo_path, glyph_name):
         if glyph_name in contents:
             return os.path.join(ufo_path, glyphs_dir, contents[glyph_name])
     return None
+
+
+def _clip_png_rows(png_path, clip_top, clip_bottom, px_height, px_width):
+    """Whiten pixel rows outside [clip_top, clip_bottom] in a grayscale/RGB PNG.
+
+    Uses only stdlib (struct + zlib) — no Pillow needed. Works on 8-bit RGB or
+    RGBA PNGs as produced by drawbot-skia. Rows with index < clip_top or
+    > clip_bottom are set to all-white (0xFF bytes), eliminating phantom pixels
+    from anti-aliasing bleed outside the glyph's actual y-bounding-box.
+    """
+    with open(png_path, "rb") as f:
+        data = f.read()
+
+    # Parse PNG: signature (8) + chunks
+    sig = data[:8]
+    assert sig == b"\x89PNG\r\n\x1a\n", "Not a PNG file"
+
+    # Collect chunks
+    chunks = []
+    pos = 8
+    while pos < len(data):
+        length = struct.unpack(">I", data[pos:pos+4])[0]
+        ctype = data[pos+4:pos+8]
+        cdata = data[pos+8:pos+8+length]
+        chunks.append((ctype, cdata))
+        pos += 12 + length
+
+    # Find IHDR to get bit depth and color type
+    ihdr_data = next(cd for ct, cd in chunks if ct == b"IHDR")
+    width, height, bit_depth, color_type = struct.unpack(">IIBB", ihdr_data[:10])
+    # color_type: 2=RGB, 6=RGBA, 0=Grayscale
+    channels = {0: 1, 2: 3, 6: 4}.get(color_type, 3)
+    bytes_per_pixel = channels  # assumes 8-bit
+
+    # Decompress IDAT data
+    idat_data = b"".join(cd for ct, cd in chunks if ct == b"IDAT")
+    raw = zlib.decompress(idat_data)
+
+    # PNG raw data: each row has 1 filter byte + width*bytes_per_pixel bytes
+    stride = 1 + width * bytes_per_pixel
+    assert len(raw) == height * stride, f"PNG decode size mismatch: {len(raw)} vs {height * stride}"
+
+    raw = bytearray(raw)
+    for row in range(height):
+        if row < clip_top or row > clip_bottom:
+            start = row * stride
+            raw[start] = 0  # filter type None
+            raw[start+1:start+stride] = b"\xff" * (stride - 1)
+
+    # Re-compress and rebuild PNG
+    new_idat = zlib.compress(bytes(raw), 9)
+    new_chunks = []
+    for ctype, cdata in chunks:
+        if ctype == b"IDAT":
+            if not any(ct == b"IDAT" for ct, _ in new_chunks):
+                new_chunks.append((b"IDAT", new_idat))
+        else:
+            new_chunks.append((ctype, cdata))
+
+    out = bytearray(sig)
+    for ctype, cdata in new_chunks:
+        out += struct.pack(">I", len(cdata))
+        out += ctype
+        out += cdata
+        crc = zlib.crc32(ctype + cdata) & 0xFFFFFFFF
+        out += struct.pack(">I", crc)
+
+    with open(png_path, "wb") as f:
+        f.write(out)
 
 
 def render_glyph(ufo_path, glyph_name, output_png, px_height=700):
@@ -85,10 +156,14 @@ def render_glyph(ufo_path, glyph_name, output_png, px_height=700):
     glyph_bounds = glyph.getBounds() if hasattr(glyph, "getBounds") else None
     if glyph_bounds is not None:
         glyph_min_x = glyph_bounds[0]
+        glyph_min_y = glyph_bounds[1]
+        glyph_max_y = glyph_bounds[3]
     else:
         # Fallback: compute bounds from contour points
-        xs = [pt.x for contour in glyph.contours for pt in contour.points]
-        glyph_min_x = min(xs) if xs else 0.0
+        pts = [(pt.x, pt.y) for contour in glyph.contours for pt in contour.points]
+        glyph_min_x = min(p[0] for p in pts) if pts else 0.0
+        glyph_min_y = min(p[1] for p in pts) if pts else descender
+        glyph_max_y = max(p[1] for p in pts) if pts else ascender
 
     # x_offset: extra pixels added to the left of the canvas so negative-LSB
     # glyphs are fully visible. In font units this is max(0, -glyph_min_x).
@@ -122,6 +197,25 @@ def render_glyph(ufo_path, glyph_name, output_png, px_height=700):
 
     db.saveImage(output_png)
     db.endDrawing()
+
+    # Clip phantom anti-aliased pixels outside the glyph's y-bounding-box.
+    # Anti-aliasing can bleed 1-2 pixels below glyph_min_y (e.g. T, l, h, n at
+    # baseline) creating spurious CURVE sections in img2bez. We whiten any pixel
+    # rows strictly below glyph_min_y or above glyph_max_y in font space.
+    #
+    # Coordinate mapping (drawbot page_y=0 is bottom, PNG row=0 is top):
+    #   pixel_row = px_height - page_y
+    #   page_y    = (font_y - descender) * scale
+    # So:
+    #   pixel_row = px_height - (font_y - descender) * scale
+    #
+    # Rows to blank below glyph: pixel_row > clip_bottom (i.e. font_y < glyph_min_y)
+    # We add a 2px margin so we don't erase the legitimate glyph bottom edge.
+    clip_margin_px = 2
+    clip_bottom = int(px_height - (glyph_min_y - descender) * scale) + clip_margin_px
+    clip_top = int(px_height - (glyph_max_y - descender) * scale) - clip_margin_px
+    if clip_bottom < px_height or clip_top > 0:
+        _clip_png_rows(output_png, clip_top, clip_bottom, px_height, px_width)
 
     return {
         "target_height": total_height,

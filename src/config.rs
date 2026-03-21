@@ -88,7 +88,7 @@ impl Default for TracingConfig {
             min_contour_area: 100.0, // ~10×10 px: filters dust/noise
             fit_accuracy: 4.0,       // font units; 2–4 is good for type
             smooth_iterations: 1,    // removes pixel staircase; >1 blurs chamfer corners
-            alphamax: 1.0,           // ~45° corner threshold; 0.6 for geometric type
+            alphamax: 0.97,          // ~45° corner threshold; 0.6 for geometric type
             grid: 0,                 // off by default; set 2 for VG
             fix_direction: true,     // required for correct font rendering
             chamfer_size: 0.0,       // off; 16 for Virtua Grotesk style
