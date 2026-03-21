@@ -50,7 +50,7 @@ struct Cli {
     /// Corner detection sensitivity (0.0–1.34)
     /// Lower = more corners = shorter smooth sections = tighter fits.
     /// Try 0.6–0.8 for geometric type, 1.0 for organic shapes.
-    #[arg(long, default_value = "0.97")]
+    #[arg(long, default_value = "0.80")]
     alphamax: f64,
 
     /// Target height in font units

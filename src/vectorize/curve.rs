@@ -81,7 +81,7 @@ const TAN_40_DEG: f64 = 0.839;
 /// Parameters for curve generation.
 pub struct CurveParams {
     /// Maximum alpha for smooth curves. Vertices with alpha >= this
-    /// are corners. Default: 0.97.
+    /// are corners. Default: 0.80.
     pub alphamax: f64,
     /// Curve fitting accuracy (in pixel-corner coordinates).
     /// Smaller = more points, closer fit. ~0.5 is good for type.
@@ -95,7 +95,7 @@ pub struct CurveParams {
 impl Default for CurveParams {
     fn default() -> Self {
         Self {
-            alphamax: 0.97,
+            alphamax: 0.80,
             accuracy: 0.5,
             smooth_iterations: 3,
         }
