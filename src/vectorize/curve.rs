@@ -30,7 +30,7 @@ const SHORT_SECTION_THRESHOLD: f64 = 100.0;
 
 /// Permissive straightness tolerance (as fraction of chord length) for
 /// sections shorter than `SHORT_SECTION_THRESHOLD`.
-const SHORT_SECTION_TOLERANCE: f64 = 0.15;
+const SHORT_SECTION_TOLERANCE: f64 = 0.10;
 
 /// Chord length above which a curved section is split at its maximum-deviation
 /// vertex. Prevents single cubics from being forced to represent large S-curves
