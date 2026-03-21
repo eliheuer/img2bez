@@ -367,7 +367,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
             let line_tol = if seg_len < SHORT_SECTION_THRESHOLD {
                 (seg_len * SHORT_SECTION_TOLERANCE).max(3.0)
             } else {
-                (seg_len * 0.02).max(3.0)
+                (seg_len * 0.035).max(3.0)
             };
             let is_line = max_dev <= line_tol;
             if debug_splits {
