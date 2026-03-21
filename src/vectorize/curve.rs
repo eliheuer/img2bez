@@ -62,7 +62,7 @@ const CURVE_DEVIATION_SAMPLES: usize = 96;
 
 /// H/V snap threshold for line segments: if one axis delta is less than
 /// this fraction of the other, snap the minor axis to zero.
-const HV_LINE_SNAP_RATIO: f64 = 0.25;
+const HV_LINE_SNAP_RATIO: f64 = 0.05;
 
 /// Maximum perpendicular deviation for merging consecutive collinear
 /// line segments into a single line.
