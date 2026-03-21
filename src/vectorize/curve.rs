@@ -21,7 +21,7 @@ const CURVATURE_TRANSITION_THRESHOLD: f64 = 0.37;
 /// Minimum chord length (in polygon-coordinate units) between adjacent
 /// split points. Sections shorter than this are candidates for removal
 /// to avoid creating tiny no-man's-land segments.
-const MIN_SECTION_CHORD: f64 = 90.0;
+const MIN_SECTION_CHORD: f64 = 8.0;
 
 /// Section chord length below which a more permissive straightness
 /// tolerance is applied. Bitmap tracing creates small curved artifacts
