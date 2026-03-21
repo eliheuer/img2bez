@@ -44,7 +44,7 @@ struct Cli {
     accuracy: f64,
 
     /// Polygon smoothing iterations before curve fitting (0 = off)
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "1")]
     smooth: usize,
 
     /// Corner detection sensitivity (0.0–1.34)

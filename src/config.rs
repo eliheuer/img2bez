@@ -87,7 +87,7 @@ impl Default for TracingConfig {
             invert: false,
             min_contour_area: 100.0, // ~10×10 px: filters dust/noise
             fit_accuracy: 4.0,       // font units; 2–4 is good for type
-            smooth_iterations: 3,    // removes pixel staircase; >5 loses detail
+            smooth_iterations: 1,    // removes pixel staircase; >1 blurs chamfer corners
             alphamax: 1.0,           // ~45° corner threshold; 0.6 for geometric type
             grid: 0,                 // off by default; set 2 for VG
             fix_direction: true,     // required for correct font rendering
