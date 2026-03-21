@@ -32,6 +32,11 @@ const SHORT_SECTION_THRESHOLD: f64 = 100.0;
 /// sections shorter than `SHORT_SECTION_THRESHOLD`.
 const SHORT_SECTION_TOLERANCE: f64 = 0.25;
 
+/// Chord length above which a curved section is split at its maximum-deviation
+/// vertex. Prevents single cubics from being forced to represent large S-curves
+/// or other complex shapes that need multiple segments.
+const LONG_CURVE_SPLIT_CHORD: f64 = 250.0;
+
 /// Minimum chord for a curve section to be eligible for Pass 1.5
 /// (splitting long curves that contain a straight run).
 const PASS15_MIN_SECTION_CHORD: f64 = 500.0;
@@ -472,6 +477,78 @@ fn build_split_points(
     }
     pts.sort_unstable();
     pts.dedup();
+
+    // For long curved sections that received no bounding-box extrema,
+    // add the maximum-deviation vertex as a split point. This prevents
+    // a single cubic from being forced to represent a large S-curve or
+    // other complex shape that inherently needs multiple segments.
+    let pts_snap = pts.clone();
+    let ns2 = pts_snap.len();
+    let mut long_curve_splits: Vec<usize> = Vec::new();
+    for si in 0..ns2 {
+        let start = pts_snap[si];
+        let end = pts_snap[(si + 1) % ns2];
+        let segment = extract_cyclic(v, start, end, m);
+        let n = segment.len();
+        if n < 4 {
+            continue;
+        }
+        let p0 = segment[0];
+        let pn = segment[n - 1];
+        let chord = ((pn.0 - p0.0).powi(2) + (pn.1 - p0.1).powi(2)).sqrt();
+        if chord < LONG_CURVE_SPLIT_CHORD {
+            continue;
+        }
+        // Skip if this section already has an extremum (already well-split).
+        let has_extremum = (1..n - 1).any(|k| {
+            let idx = (start + k) % m;
+            extrema_set.contains(&idx)
+        });
+        if has_extremum {
+            continue;
+        }
+        // Find the polygon vertex farthest from the chord line.
+        let dx = pn.0 - p0.0;
+        let dy = pn.1 - p0.1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-9 {
+            continue;
+        }
+        let mut best_idx = 0usize;
+        let mut best_dev = 0.0_f64;
+        for k in 1..n - 1 {
+            let ex = segment[k].0 - p0.0;
+            let ey = segment[k].1 - p0.1;
+            let dev = (ex * dy - ey * dx).abs() / len;
+            if dev > best_dev {
+                best_dev = dev;
+                best_idx = k;
+            }
+        }
+        // Only split if this is an S-curve (curvature changes sign).
+        // For a simple arc, all vertices deviate from the chord in the
+        // same direction — splitting would add an unwanted kink.
+        if best_dev > 5.0 {
+            let signed_devs: Vec<f64> = (1..n - 1)
+                .map(|k| {
+                    let ex = segment[k].0 - p0.0;
+                    let ey = segment[k].1 - p0.1;
+                    (ex * dy - ey * dx) / len
+                })
+                .collect();
+            let has_pos = signed_devs.iter().any(|&d| d > 1.0);
+            let has_neg = signed_devs.iter().any(|&d| d < -1.0);
+            if has_pos && has_neg {
+                long_curve_splits.push((start + best_idx) % m);
+            }
+        }
+    }
+    if !long_curve_splits.is_empty() {
+        pts.extend(long_curve_splits.iter().copied());
+        extrema_set.extend(long_curve_splits);
+        pts.sort_unstable();
+        pts.dedup();
+    }
 
     // Remove transitions that create very short sections.
     // When a curvature transition fires close to a corner,
