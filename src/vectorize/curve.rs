@@ -35,7 +35,7 @@ const SHORT_SECTION_TOLERANCE: f64 = 0.25;
 /// Chord length above which a curved section is split at its maximum-deviation
 /// vertex. Prevents single cubics from being forced to represent large S-curves
 /// or other complex shapes that need multiple segments.
-const LONG_CURVE_SPLIT_CHORD: f64 = 250.0;
+const LONG_CURVE_SPLIT_CHORD: f64 = 200.0;
 
 /// Minimum chord for a curve section to be eligible for Pass 1.5
 /// (splitting long curves that contain a straight run).
