@@ -12,6 +12,19 @@ Built on the [Linebender](https://linebender.org) ecosystem: [kurbo](https://cra
 cargo install --git https://github.com/eliheuer/img2bez
 ```
 
+### Autoresearch visualizations (optional)
+
+The autoresearch loop generates per-glyph bezier structure comparison images.
+This requires [designbot](https://github.com/eliheuer/designbot):
+
+```bash
+cargo install --git https://github.com/eliheuer/designbot designbot-cli
+```
+
+Once installed, `autoresearch/run_experiment.sh` will automatically render
+`viz_uni<XXXX>.png` files for the weakest glyphs after each experiment run.
+If `designbot` is not on your `PATH` the viz step is silently skipped.
+
 Or to use as a library, add to your `Cargo.toml`:
 
 ```toml
@@ -144,6 +157,82 @@ IMG2BEZ_DEBUG_SPLITS=1 img2bez --input glyph.png --output MyFont.ufo --name A
 | `IMG2BEZ_DEBUG_FIT` | Print per-section curve fitting details |
 | `IMG2BEZ_DEBUG_NO_CLEANUP` | Skip all post-processing |
 | `IMG2BEZ_DEBUG_PIXELDIFF` | Save 1:1 pixel diff image |
+
+## Autoresearch
+
+An overnight research loop that autonomously improves img2bez by tracing
+hand-drawn reference glyphs and comparing raster + vector quality metrics.
+Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+
+### How it works
+
+```
+reference.ufo (hand-drawn glyphs)
+      |
+render_glyph.py  →  glyph.png   (drawbot-skia renders each .glif to bitmap)
+      |
+img2bez          →  traced.glif  (trace the bitmap back to bezier outlines)
+      |
+--reference flag →  metrics     (raster IoU + weighted vector quality score)
+      |
+agent loop       →  keep/discard  (Claude proposes changes, keeps if mean_iou improves)
+```
+
+### Running a session
+
+```bash
+# 1. Create a research branch
+git checkout -b autoresearch/$(date +%b%d | tr A-Z a-z)
+
+# 2. Activate the Python venv (needs ufoLib2 + drawbot-skia)
+source ~/Py/venvs/basic-fonts/bin/activate
+
+# 3. Run the experiment harness
+./autoresearch/run_experiment.sh
+
+# 4. Tell Claude to follow the instructions and run overnight
+# "Follow autoresearch/program.md and improve img2bez"
+```
+
+### Current baseline
+
+Reference font: **Virtua Grotesk Regular** (`autoresearch/reference.ufo` →
+symlink to `~/GH/repos/virtua-grotesk/sources/VirtuaGrotesk-Regular.ufo`)
+
+Glyphs tested: A–Z + a–z (52 glyphs, all with real hand-drawn outlines)
+
+| Metric | Baseline |
+|--------|----------|
+| mean_iou | 90.39% |
+| mean_score | 0.804 |
+| glyphs_ok | 51/52 |
+
+Established on commit `82acffa` (2026-03-20). Results logged to
+`autoresearch/results.tsv` (gitignored).
+
+### Switching reference fonts
+
+```bash
+# Point at a different UFO
+ln -sf /path/to/other.ufo autoresearch/reference.ufo
+
+# Or override per-run without changing the symlink
+REFERENCE_UFO=/path/to/other.ufo ./autoresearch/run_experiment.sh
+
+# Run a focused subset of glyphs
+GLYPHS_FILTER="O S G" ./autoresearch/run_experiment.sh
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `autoresearch/program.md` | Full instructions for Claude to follow as the research agent |
+| `autoresearch/run_experiment.sh` | Experiment harness: render → trace → evaluate → report |
+| `autoresearch/render_glyph.py` | Render a `.glif` to PNG via drawbot-skia |
+| `autoresearch/setup.sh` | One-time setup check |
+| `autoresearch/results.tsv` | Experiment log (gitignored, maintained by the agent) |
+| `autoresearch/reference.ufo` | Symlink to reference UFO (gitignored) |
 
 ## License
 

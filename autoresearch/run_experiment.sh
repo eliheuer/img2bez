@@ -241,8 +241,8 @@ fi
 
 # ── Bezier structure visualizations (bottom 8 glyphs by IoU) ──────────────────
 
-VIZ_SCRIPT="$SCRIPT_DIR/viz_glyphs.py"
-if [ -f "$VIZ_SCRIPT" ] && [ -f "$OUTPUT_UFO/glyphs/contents.plist" ]; then
+VIZ_SCRIPT="$SCRIPT_DIR/viz_glyphs.rs"
+if command -v designbot &>/dev/null && [ -f "$VIZ_SCRIPT" ] && [ -f "$OUTPUT_UFO/glyphs/contents.plist" ]; then
     # Collect per-glyph IoU from log files; sort ascending; take bottom 8
     weakest=$(
         for glyph_name in "${GLYPH_NAMES[@]}"; do
@@ -256,7 +256,8 @@ if [ -f "$VIZ_SCRIPT" ] && [ -f "$OUTPUT_UFO/glyphs/contents.plist" ]; then
         echo ""
         echo "Rendering bezier viz for weakest glyphs: $(echo $weakest | tr '\n' ' ')"
         # shellcheck disable=SC2086
-        python3 "$VIZ_SCRIPT" "$OUTPUT_UFO" "$REFERENCE_UFO" "$WORK_DIR" $weakest 2>/dev/null \
+        designbot --render "$VIZ_SCRIPT" --output /dev/null \
+            -- "$OUTPUT_UFO" "$REFERENCE_UFO" "$WORK_DIR" $weakest 2>/dev/null \
             && echo "Viz saved to $WORK_DIR/viz_uni*.png"
     fi
 fi

@@ -57,6 +57,17 @@ const PASS15_MIN_CURVE_POINTS: usize = 4;
 /// chamfer-to-stem transitions.
 const PASS15_SHORT_SUBSECTION: usize = 7;
 
+/// Maximum chord for a flanking section when filtering false-corner clusters.
+/// A moderate corner is suppressed only if BOTH its flanking section chords
+/// are below this threshold, indicating it is a staircase-artifact cluster
+/// rather than a genuine geometric feature.
+const FALSE_CORNER_MAX_FLANK: f64 = 60.0;
+
+/// Alpha at or above which a corner is definitively genuine and is never
+/// suppressed by false-corner filtering. Set below 1.0 to protect high-alpha
+/// corners that mark real geometric features (e.g. inflection points).
+const FALSE_CORNER_GENUINE_ALPHA: f64 = 0.95;
+
 /// Maximum ratio between the two handle lengths of a fitted cubic.
 /// Prevents lopsided curves where one handle dominates.
 const MAX_HANDLE_RATIO: f64 = 1.5;
@@ -295,7 +306,7 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
     // Merge only non-corner transitions that are at the same vertex.
     base_splits = merge_nearby_preserve_corners(base_splits, 1, m, &corner_set);
 
-    let mut split_points = build_split_points(v, &base_splits, &corner_set, params, m);
+    let split_points = build_split_points(v, &base_splits, &corner_set, params, m);
 
     // DEBUG: print split analysis when IMG2BEZ_DEBUG_SPLITS is set
     if std::env::var("IMG2BEZ_DEBUG_SPLITS").is_ok() {
@@ -337,6 +348,16 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
 
     if split_points.is_empty() {
         // No corners or extrema: smooth cyclically then fit entire closed curve.
+        let smoothed = laplacian_smooth(v, params.smooth_iterations, true);
+        return fit_smooth_closed(&smoothed, params.accuracy);
+    }
+
+    // Pass 0: remove false-corner clusters (staircase artifacts from low alphamax).
+    // Moderate corners with very short sections on both sides are suppressed.
+    let mut split_points =
+        filter_false_corners(&split_points, v, &alphas, params.alphamax);
+
+    if split_points.is_empty() {
         let smoothed = laplacian_smooth(v, params.smooth_iterations, true);
         return fit_smooth_closed(&smoothed, params.accuracy);
     }
@@ -433,6 +454,66 @@ pub fn polygon_to_bezpath(poly: &Polygon, params: &CurveParams) -> BezPath {
 }
 
 // ── Split point computation ──────────────────────────────
+
+/// Remove moderate-alpha corners that have short sections on BOTH sides.
+///
+/// With a low alphamax (e.g. 0.80) staircase polygon artifacts in smooth
+/// curve regions produce clusters of corners, each with alpha just above
+/// alphamax but below TRUE corner level (FALSE_CORNER_GENUINE_ALPHA = 1.0).
+/// These fragment smooth arcs into tiny consecutive LINE sections.
+///
+/// A corner is removed if its alpha ∈ [alphamax, FALSE_CORNER_GENUINE_ALPHA)
+/// and both its flanking section chords are < FALSE_CORNER_MAX_FLANK px.
+/// The loop repeats until stable so cascading clusters collapse fully.
+fn filter_false_corners(
+    split_points: &[usize],
+    v: &[(f64, f64)],
+    alphas: &[f64],
+    alphamax: f64,
+) -> Vec<usize> {
+    let mut pts = split_points.to_vec();
+    loop {
+        if pts.len() < 3 {
+            break;
+        }
+        let mut removed = false;
+        let mut i = 0;
+        while i < pts.len() {
+            let sp = pts[i];
+            let alpha = alphas.get(sp).copied().unwrap_or(0.0);
+            // Only candidates: moderate corners (not extrema/transitions which
+            // have low alpha, and not genuine hard corners which have alpha≥1.0).
+            if alpha < alphamax || alpha >= FALSE_CORNER_GENUINE_ALPHA {
+                i += 1;
+                continue;
+            }
+            let n = pts.len();
+            let prev = pts[(i + n - 1) % n];
+            let next = pts[(i + 1) % n];
+            let chord_before = {
+                let dx = v[sp].0 - v[prev].0;
+                let dy = v[sp].1 - v[prev].1;
+                (dx * dx + dy * dy).sqrt()
+            };
+            let chord_after = {
+                let dx = v[next].0 - v[sp].0;
+                let dy = v[next].1 - v[sp].1;
+                (dx * dx + dy * dy).sqrt()
+            };
+            if chord_before < FALSE_CORNER_MAX_FLANK && chord_after < FALSE_CORNER_MAX_FLANK {
+                pts.remove(i);
+                removed = true;
+                // Don't increment — the element at position i is now the next one.
+            } else {
+                i += 1;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    pts
+}
 
 /// Compute final split points from base splits (corners + transitions).
 ///
