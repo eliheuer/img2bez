@@ -31,8 +31,8 @@ struct Cli {
     #[arg(short = 'w', long)]
     width: Option<f64>,
 
-    /// Grid size for coordinate snapping (0 = off)
-    #[arg(long, default_value = "0")]
+    /// Grid size for coordinate snapping (2 = even integers for power-of-2 grid; 0 = off)
+    #[arg(long, default_value = "2")]
     grid: i32,
 
     /// Chamfer size (0 = off)
@@ -53,12 +53,12 @@ struct Cli {
     #[arg(long, default_value = "0.80")]
     alphamax: f64,
 
-    /// Target height in font units
-    #[arg(long, default_value = "1000")]
+    /// Target height in font units (ascender - descender; 1088 for 1024 UPM)
+    #[arg(long, default_value = "1088")]
     target_height: f64,
 
-    /// Y offset after scaling (typically descender)
-    #[arg(long, default_value = "0", allow_hyphen_values = true)]
+    /// Y offset after scaling (typically descender; -256 for 1024 UPM)
+    #[arg(long, default_value = "-256", allow_hyphen_values = true)]
     y_offset: f64,
 
     /// Invert the image before tracing

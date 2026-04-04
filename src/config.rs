@@ -89,15 +89,15 @@ impl Default for TracingConfig {
             fit_accuracy: 4.0,       // font units; 2–4 is good for type
             smooth_iterations: 1,    // removes pixel staircase; >1 blurs chamfer corners
             alphamax: 0.80,          // ~45° corner threshold; 0.6 for geometric type
-            grid: 0,                 // off by default; set 2 for VG
+            grid: 2,                 // snap on-curve points to even integers (power-of-2 grid)
             fix_direction: true,     // required for correct font rendering
             chamfer_size: 0.0,       // off; 16 for Virtua Grotesk style
             chamfer_min_edge: 40.0,  // don't chamfer edges shorter than this
             advance_width: None,     // auto-compute from bbox + sidebearings
-            lsb: 50.0,               // left sidebearing in font units
-            rsb: 50.0,               // right sidebearing in font units
-            target_height: 1000.0,   // UPM-relative; 1088 for VG (asc-desc)
-            y_offset: 0.0,           // set to descender (e.g. -256) to align baseline
+            lsb: 64.0,               // left sidebearing in font units (power-of-2 grid)
+            rsb: 64.0,               // right sidebearing in font units (power-of-2 grid)
+            target_height: 1088.0,   // ascender - descender: 832 - (-256) = 1088
+            y_offset: -256.0,        // descender: aligns baseline at y=0
             codepoints: vec![],
             verbose: false,
         }
