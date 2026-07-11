@@ -1,0 +1,68 @@
+[package]
+name = "img2bez"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Eli Heuer <eli@elih.net>"]
+description = "Trace bitmap glyph images to bezier contours and insert them directly into UFO font sources"
+repository = "https://github.com/eliheuer/img2bez"
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+keywords = ["font", "bezier", "tracing", "ufo", "vectorization"]
+categories = ["graphics", "rendering::data-formats"]
+exclude = [
+    "eval-harness/",
+    "docs/",
+    ".github/",
+    "wasm/",
+    "mcp/",
+    "*_comparison.png",
+]
+
+[[bin]]
+name = "img2bez"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+imageproc = { version = "0.25", default-features = false }
+kurbo = "0.13"
+rayon = { version = "1.10", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+thiserror = "2"
+tiny-skia = { version = "0.11", optional = true }
+png = { version = "0.17", optional = true }
+
+# Optional: output backends
+norad = { version = "0.18", features = ["kurbo"], optional = true }
+
+# Optional: CLI
+clap = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+[features]
+# Batteries-included by default (CLI + UFO output + rendering + parallelism)
+# so `cargo install img2bez` and `cargo build` just work. Library users who
+# want a lean build can opt out with `default-features = false` and re-add
+# only what they need (e.g. `features = ["ufo"]`); see the README.
+default = ["cli", "ufo", "parallel", "render"]
+ufo = ["dep:norad"]
+cli = ["dep:clap", "dep:serde_json", "ufo", "render"]
+parallel = ["dep:rayon"]
+render = ["dep:tiny-skia", "dep:png"]
+# Master-compatibility refit (move an existing outline onto a raster of another
+# weight). Experimental and off by default — it distorts some glyphs and has no
+# regression tests yet; opt in explicitly.
+experimental-refit = []
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_qualifications = "warn"
