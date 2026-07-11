@@ -1,0 +1,28 @@
+# img2bez as an MCP server: exposes glyph tracing as tools an AI agent can
+# call (image path in → outline JSON / SVG / GLIF out). Speaks the Model
+# Context Protocol over stdio (newline-delimited JSON-RPC 2.0).
+#
+# Detached from the img2bez package's build via the empty [workspace] table,
+# so `cargo build`/`cargo install` in the repo root are unaffected.
+# Build with: cargo build --release --manifest-path mcp/Cargo.toml
+[package]
+name = "img2bez-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "MCP server exposing img2bez raster-to-vector glyph tracing as agent tools"
+repository = "https://github.com/eliheuer/img2bez"
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "img2bez-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Just the tracer: no ufo/norad, render/tiny-skia, cli/clap, or rayon.
+img2bez = { path = "..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

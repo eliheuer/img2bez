@@ -1,0 +1,37 @@
+# img2bez compiled for the web: a thin wasm-bindgen wrapper around the
+# img2bez trace + place pipeline for in-browser tracing (the elih.net demo,
+# and any web font editor — mixfont, shift, runebender-web).
+#
+# Detached from the img2bez package's build via the empty [workspace] table
+# below, so `cargo build`/`cargo install` in the repo root are unaffected.
+# Build for the web with: wasm-pack build wasm --target web --release
+# Publish to npm (from wasm/pkg) yourself; see README.md.
+[package]
+name = "img2bez-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "Trace bitmap glyph images to bezier outlines, in the browser (WebAssembly bindings for img2bez)"
+repository = "https://github.com/eliheuer/img2bez"
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+keywords = ["font", "bezier", "tracing", "wasm", "vectorization"]
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Drop the default features (ufo/norad, cli/clap, parallel/rayon) — rayon does
+# not fit wasm and UFO writing happens host-side. `render` stays on for the
+# reference-free judge's reproduction-IoU (tiny-skia compiles to wasm).
+img2bez = { path = "..", default-features = false, features = ["render"] }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
