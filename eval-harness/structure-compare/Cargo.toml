@@ -1,0 +1,34 @@
+# Standalone eval-harness dev tool: render every glyph of a source UFO,
+# trace the renders with the img2bez library IN-PROCESS (exact parity with
+# the crate, no subprocess), and compare traced outline structure against
+# the source outlines — side-by-side structure sheets plus a TSV of
+# structure stats and handle-invariant scans (kinks, magic triangle,
+# reach). The source font is the ground truth for what a trace SHOULD be.
+#
+# Lives under eval-harness/ (excluded from the published img2bez crate)
+# and never ships. Sheets are drawn with designbot, expected as a sibling
+# checkout at ../../../designbot (https://github.com/eliheuer/designbot).
+#
+# Empty [workspace] table makes this its own workspace root so cargo does
+# not try to fold it into the parent img2bez package.
+[workspace]
+
+[package]
+name = "structure-compare"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "structure-compare"
+path = "src/main.rs"
+
+[dependencies]
+img2bez = { path = "../..", default-features = false }
+designbot = { path = "../../../designbot" }
+norad = "0.18"
+kurbo = "0.13"
+tiny-skia = "0.11"
+
+[profile.release]
+debug-assertions = true # keep overflow checks: this is a QA tool

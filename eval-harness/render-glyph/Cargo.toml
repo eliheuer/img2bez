@@ -1,0 +1,23 @@
+# Standalone eval-harness dev tool: rasterize a UFO glyph to a PNG in the exact
+# coordinate space img2bez expects. Pure Rust (norad + tiny-skia), replacing the
+# old drawbot-skia Python renderer. Lives under eval-harness/ (excluded from the
+# published img2bez crate) and never ships.
+#
+# Empty [workspace] table makes this its own workspace root so cargo does not try
+# to fold it into the parent img2bez package.
+[workspace]
+
+[package]
+name = "render-glyph"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "render-glyph"
+path = "src/main.rs"
+
+[dependencies]
+norad = { version = "0.18", features = ["kurbo"] }
+kurbo = "0.13"
+tiny-skia = "0.11"

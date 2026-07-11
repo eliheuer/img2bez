@@ -1,0 +1,3 @@
+Pillow>=10
+ufoLib2>=0.16
+drawbot-skia @ git+https://github.com/eliheuer/drawbot-skia.git
