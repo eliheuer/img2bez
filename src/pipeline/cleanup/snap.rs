@@ -14,9 +14,35 @@ const ROUND_MAX_DEVIATION: f64 = 1.5;
 /// Snap on-curve points to a grid. Off-curve control points are NOT snapped,
 /// preserving curve shape.
 pub fn to_grid(path: &BezPath, grid: f64) -> BezPath {
-    let snap = |p: Point| -> Point {
-        Point::new((p.x / grid).round() * grid, (p.y / grid).round() * grid)
-    };
+    to_grid_with(path, |v| (v / grid).round() * grid)
+}
+
+/// Snap on-curve points to a two-tier dyadic self-labeling grid: each
+/// coordinate lands on the coarse `structure` grid when it is within one
+/// `fine` step of a structure line (a structural point), and on the `fine`
+/// grid otherwise (an optical correction, on `fine` but off `structure`).
+/// The output is self-labeling: a coordinate on `fine` but off `structure`
+/// can only have been placed as a deliberate correction. Off-curve control
+/// points are NOT snapped, preserving curve shape.
+///
+/// TODO: the "within one fine step" tolerance is a first heuristic and will
+/// misclassify some points. Review and tune against real traced projects
+/// before trusting the structure/correction split (see
+/// `TraceOptions::structure_grid`).
+pub fn to_two_tier_grid(path: &BezPath, fine: f64, structure: f64) -> BezPath {
+    to_grid_with(path, move |v| {
+        let s = (v / structure).round() * structure; // nearest structure line
+        if (v - s).abs() <= fine {
+            s // structural: on the coarse grid
+        } else {
+            (v / fine).round() * fine // correction: on the fine grid, off structure
+        }
+    })
+}
+
+/// Apply a coordinate-snapping function to on-curve points only.
+fn to_grid_with(path: &BezPath, snap_coord: impl Fn(f64) -> f64) -> BezPath {
+    let snap = |p: Point| Point::new(snap_coord(p.x), snap_coord(p.y));
     BezPath::from_vec(
         path.elements()
             .iter()
@@ -342,5 +368,34 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn two_tier_snap_labels_structure_and_corrections() {
+        let mut path = BezPath::new();
+        path.move_to(Point::new(7.4, 96.0)); // 7.4 within 2 of 8, 96 on 8 -> both structure
+        path.line_to(Point::new(11.0, 13.0)); // 11 -> 12 (off 8), 13 -> 14 (off 8) -> corrections
+        path.push(PathEl::ClosePath);
+
+        let snapped = to_two_tier_grid(&path, 2.0, 8.0);
+        let pts: Vec<Point> = snapped
+            .elements()
+            .iter()
+            .filter_map(|el| match el {
+                PathEl::MoveTo(p) | PathEl::LineTo(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+
+        // Every coordinate lands on the fine grid.
+        for p in &pts {
+            assert_eq!(p.x % 2.0, 0.0, "x={} off the 2-grid", p.x);
+            assert_eq!(p.y % 2.0, 0.0, "y={} off the 2-grid", p.y);
+        }
+        // Point near the 8-grid is pulled onto it (structure).
+        assert_eq!(pts[0], Point::new(8.0, 96.0));
+        // Point in the mid-zone stays off the 8-grid (correction).
+        assert_eq!(pts[1], Point::new(12.0, 14.0));
+        assert_ne!(pts[1].x % 8.0, 0.0, "correction x should be off the 8-grid");
     }
 }

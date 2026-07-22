@@ -87,6 +87,12 @@ struct Cli {
     #[arg(long, default_value = "2")]
     grid: i32,
 
+    /// Coarse structure grid for the dyadic self-labeling snap (e.g. 8;
+    /// 0 = off). On-curve points snap here where close (structure) and drop
+    /// to --grid only where snapping here would distort (a correction).
+    #[arg(long, default_value = "0")]
+    structure_grid: i32,
+
     /// Chamfer size (0 = off)
     #[arg(long, default_value = "0")]
     chamfer: f64,
@@ -508,6 +514,7 @@ fn opts_from_cli(cli: &Cli) -> TraceOptions {
     opts.profile = cli.profile.into();
     opts.fit_accuracy = cli.accuracy.unwrap_or(cli.profile.fit_accuracy());
     opts.grid = cli.grid;
+    opts.structure_grid = cli.structure_grid;
     opts.chamfer_size = cli.chamfer;
     opts.invert = cli.invert;
     opts.threshold = match cli.threshold {

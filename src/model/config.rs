@@ -227,6 +227,19 @@ pub struct TraceOptions {
     // -- Post-processing --
     /// Grid size for coordinate snapping. 0 = no snapping.
     pub grid: i32,
+    /// Coarse structure grid for the dyadic self-labeling snap (0 = off, the
+    /// default). When set (e.g. 8), on-curve points snap to this grid where
+    /// they land close to it (structure) and fall back to `grid` only where
+    /// snapping to the structure grid would move them too far (an optical
+    /// correction). The result is self-labeling: a point on `grid` but off
+    /// `structure_grid` can only be a deliberate correction.
+    ///
+    /// TODO: first-pass heuristic — a fixed distance tolerance of one `grid`
+    /// step. Review and tune against real traced projects before trusting the
+    /// structure/correction split. A human places corrections by design
+    /// intent; this places them by distance to the structure grid, which is a
+    /// crude proxy and will misclassify some points.
+    pub structure_grid: i32,
     /// Whether to correct contour direction (CCW outer, CW counter).
     pub fix_direction: bool,
     /// Chamfer size in font units. 0 = no chamfers.
@@ -332,6 +345,7 @@ impl Default for TraceOptions {
             fit_accuracy: 2.0,
             em_height: 1088.0,
             grid: 2,
+            structure_grid: 0,
             fix_direction: true,
             chamfer_size: 0.0,
             chamfer_min_edge: 40.0,
@@ -384,6 +398,14 @@ impl TraceOptions {
     /// Set the coordinate snapping grid (0 = no snapping).
     pub fn with_grid(mut self, grid: i32) -> Self {
         self.grid = grid;
+        self
+    }
+
+    /// Set the coarse structure grid for the dyadic self-labeling snap
+    /// (0 = off). See [`TraceOptions::structure_grid`]. Typically 8, paired
+    /// with a `grid` of 2.
+    pub fn with_structure_grid(mut self, structure_grid: i32) -> Self {
+        self.structure_grid = structure_grid;
         self
     }
 

@@ -60,7 +60,17 @@ pub fn process(paths: &[BezPath], config: &TraceOptions) -> Vec<BezPath> {
 
     if config.grid > 0 {
         let grid = config.grid as f64;
-        result = result.iter().map(|p| snap::to_grid(p, grid)).collect();
+        // Two-tier dyadic self-labeling snap when a coarser structure grid is
+        // set (e.g. 8 over a fine grid of 2); otherwise a single-grid snap.
+        result = if config.structure_grid > config.grid {
+            let structure = config.structure_grid as f64;
+            result
+                .iter()
+                .map(|p| snap::to_two_tier_grid(p, grid, structure))
+                .collect()
+        } else {
+            result.iter().map(|p| snap::to_grid(p, grid)).collect()
+        };
     }
 
     // H/V snap spares smooth inflection points (their near-axis tangents are
