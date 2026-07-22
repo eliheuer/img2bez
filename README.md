@@ -40,13 +40,18 @@ img2bez --input glyph.png --output MyFont.ufo --name A --unicode 0041
 # With font metrics and grid snapping
 img2bez --input glyph.png --output MyFont.ufo --name A --unicode 0041 \
   --target-height 1024 --y-offset -256 --grid 2
+
+# Dyadic self-labeling snap: structure on the 8-grid, corrections on the 2-grid
+img2bez --input glyph.png --output MyFont.ufo --name A --unicode 0041 \
+  --grid 2 --structure-grid 8
 ```
 
 `img2bez --help` is the authoritative flag list, including the `masters`
 (interpolation-compatible variable-font masters) and `new-font`
 subcommands. Key flags: `--profile wild|clean|photo` (source-class
 preset), `--accuracy` (fit tolerance, font units), `--mode smooth|line`
-(shape constraint), `--format ufo|glif|json|svg`.
+(shape constraint), `--format ufo|glif|json|svg`, `--structure-grid`
+(coarse structure grid for the two-tier dyadic snap; 0 = off).
 
 ## Library usage
 
