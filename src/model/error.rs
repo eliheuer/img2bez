@@ -48,6 +48,11 @@ pub enum TraceError {
     #[error("failed to load .glif file: {0}")]
     GlifLoad(#[from] norad::error::GlifLoadError),
 
+    /// A surgical single-glyph UFO write failed (contents.plist or .glif).
+    #[cfg(feature = "ufo")]
+    #[error("ufo write: {0}")]
+    UfoWrite(String),
+
     /// A UFO contour could not be converted to a kurbo path.
     #[cfg(feature = "ufo")]
     #[error("contour conversion failed: {0}")]

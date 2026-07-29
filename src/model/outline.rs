@@ -115,6 +115,57 @@ impl Contour {
             self.points.rotate_left(i);
         }
     }
+
+    /// Signed area of the point polygon (on- and off-curve points alike):
+    /// positive = counter-clockwise in y-up font space. The control polygon
+    /// approximates the filled curve closely enough for orientation and
+    /// nesting decisions.
+    pub fn signed_area(&self) -> f64 {
+        let pts = &self.points;
+        let n = pts.len();
+        let mut sum = 0.0;
+        for i in 0..n {
+            let a = &pts[i];
+            let b = &pts[(i + 1) % n];
+            sum += a.x * b.y - b.x * a.y;
+        }
+        sum / 2.0
+    }
+
+    /// Reverse the contour's traversal direction in place.
+    ///
+    /// On-curve point types (`line`/`curve`/`qcurve`) describe the segment
+    /// ARRIVING at the point, so reversal moves each on-curve point's type to
+    /// what was previously its outgoing segment. Smooth flags stay with their
+    /// points; off-curves are untouched. The start point is re-normalized.
+    pub fn reverse(&mut self) {
+        let n = self.points.len();
+        if n < 2 {
+            return;
+        }
+        let onc: Vec<usize> = (0..n)
+            .filter(|&i| self.points[i].kind != PointKind::OffCurve)
+            .collect();
+        if onc.is_empty() {
+            self.points.reverse();
+            return;
+        }
+        let mut outgoing = vec![PointKind::OffCurve; n];
+        for (k, &i) in onc.iter().enumerate() {
+            let next = onc[(k + 1) % onc.len()];
+            outgoing[i] = self.points[next].kind;
+        }
+        let mut out: Vec<OutlinePoint> = Vec::with_capacity(n);
+        for i in (0..n).rev() {
+            let mut pt = self.points[i];
+            if pt.kind != PointKind::OffCurve {
+                pt.kind = outgoing[i];
+            }
+            out.push(pt);
+        }
+        self.points = out;
+        self.normalize_start(false);
+    }
 }
 
 /// A traced glyph outline: one or more closed contours.
@@ -140,6 +191,57 @@ impl Outline {
     pub fn normalize_starts(&mut self, rtl: bool) {
         for c in &mut self.contours {
             c.normalize_start(rtl);
+        }
+    }
+
+    /// Normalize winding for the UFO ink convention: outer contours
+    /// counter-clockwise, counters clockwise, decided by even-odd nesting
+    /// depth (point-in-polygon over the point polygons). Runs before any
+    /// glyph is written so no consumer ever sees a hole that fills
+    /// (virtua-grotesk section, 2026-07-29: reconciled masters came out
+    /// all-clockwise and the loop counter rendered solid).
+    pub fn fix_directions(&mut self) {
+        let n = self.contours.len();
+        if n == 0 {
+            return;
+        }
+        let polys: Vec<Vec<(f64, f64)>> = self
+            .contours
+            .iter()
+            .map(|c| c.points.iter().map(|p| (p.x, p.y)).collect())
+            .collect();
+        let inside = |pt: (f64, f64), poly: &[(f64, f64)]| -> bool {
+            let (x, y) = pt;
+            let mut odd = false;
+            let m = poly.len();
+            for i in 0..m {
+                let (ax, ay) = poly[i];
+                let (bx, by) = poly[(i + 1) % m];
+                if (ay > y) != (by > y) {
+                    let xi = ax + (y - ay) * (bx - ax) / (by - ay);
+                    if xi > x {
+                        odd = !odd;
+                    }
+                }
+            }
+            odd
+        };
+        for i in 0..n {
+            let probe = self.contours[i]
+                .points
+                .iter()
+                .find(|p| p.kind != PointKind::OffCurve)
+                .or_else(|| self.contours[i].points.first())
+                .map(|p| (p.x, p.y));
+            let Some(probe) = probe else { continue };
+            let depth = (0..n)
+                .filter(|&j| j != i && inside(probe, &polys[j]))
+                .count();
+            let want_ccw = depth % 2 == 0;
+            let is_ccw = self.contours[i].signed_area() > 0.0;
+            if want_ccw != is_ccw {
+                self.contours[i].reverse();
+            }
         }
     }
 

@@ -430,7 +430,15 @@ pub fn write_into_ufo(
     ufo_path: &Path,
     metrics: &FontMetrics,
 ) -> Result<(), TraceError> {
-    let glyph = ufo::to_glyph(glyph_name, placed, codepoints)?;
+    // Normalize winding before anything is written: outer CCW, counters CW
+    // (UFO ink convention) — reconciled master sets can arrive all-CW.
+    let mut placed = placed.clone();
+    placed.outline.fix_directions();
+    let glyph = ufo::to_glyph(glyph_name, &placed, codepoints)?;
+    if ufo_path.join("glyphs").join("contents.plist").exists() {
+        // Existing font: touch only this glyph's files.
+        return ufo::write_glyph_surgical(ufo_path, &glyph);
+    }
     let mut font = ufo::open_or_create_font(ufo_path, metrics)?;
     font.default_layer_mut().insert_glyph(glyph);
     font.save(ufo_path)?;

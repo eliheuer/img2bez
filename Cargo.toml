@@ -37,12 +37,14 @@ png = { version = "0.17", optional = true }
 
 # Optional: output backends
 norad = { version = "0.18", features = ["kurbo"], optional = true }
+plist = { version = "1", optional = true }
 
 # Optional: CLI
 clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"
 
 [features]
 # Batteries-included by default (CLI + UFO output + rendering + parallelism)
@@ -50,7 +52,7 @@ serde_json = "1"
 # want a lean build can opt out with `default-features = false` and re-add
 # only what they need (e.g. `features = ["ufo"]`); see the README.
 default = ["cli", "ufo", "parallel", "render"]
-ufo = ["dep:norad"]
+ufo = ["dep:norad", "dep:plist"]
 cli = ["dep:clap", "dep:serde_json", "ufo", "render"]
 parallel = ["dep:rayon"]
 render = ["dep:tiny-skia", "dep:png"]

@@ -138,3 +138,173 @@ pub(crate) fn to_contour(contour: &outline::Contour) -> Contour {
         .collect();
     Contour::new(points, None)
 }
+
+
+/// Insert or replace ONE glyph in an on-disk UFO by writing only its `.glif`
+/// (plus, for a brand-new glyph, the `glyphs/contents.plist` entry). Never
+/// re-serializes the rest of the font — a full `norad::Font::save` reformats
+/// every file in its own style (observed: 638-file diff in a live repo).
+///
+/// # Errors
+///
+/// [`TraceError::UfoWrite`] if the UFO has no readable
+/// `glyphs/contents.plist` (fresh fonts should go through a full save) or
+/// the plist/glif write fails.
+pub fn write_glyph_surgical(
+    ufo_path: &Path,
+    glyph: &Glyph,
+) -> Result<(), TraceError> {
+    let glyphs_dir = ufo_path.join("glyphs");
+    let contents_path = glyphs_dir.join("contents.plist");
+    let mut contents: plist::Dictionary = plist::from_file(&contents_path)
+        .map_err(|e| TraceError::UfoWrite(format!(
+            "read {}: {e}", contents_path.display())))?;
+    let name = glyph.name().to_string();
+    let file_name = match contents.get(&name).and_then(|v| v.as_string()) {
+        Some(existing) => existing.to_string(),
+        None => {
+            let fname = glif_file_name(&name, &contents);
+            contents.insert(name, plist::Value::String(fname.clone()));
+            plist::to_file_xml(&contents_path, &contents).map_err(|e| {
+                TraceError::UfoWrite(format!(
+                    "write {}: {e}", contents_path.display()))
+            })?;
+            fname
+        }
+    };
+    glyph
+        .save(glyphs_dir.join(&file_name))
+        .map_err(|e| TraceError::UfoWrite(format!("write {file_name}: {e}")))
+}
+
+/// UFO3-style glif file name: each ASCII uppercase letter gets a trailing
+/// underscore; unsafe characters become underscores. Uniqueness against the
+/// existing contents values is enforced with a numeric suffix. (Simplified
+/// from the UFO spec's full user-name-to-file-name algorithm; sufficient for
+/// glyph names img2bez produces.)
+fn glif_file_name(name: &str, contents: &plist::Dictionary) -> String {
+    let mut stem = String::with_capacity(name.len() + 4);
+    for ch in name.chars() {
+        if ch.is_ascii_uppercase() {
+            stem.push(ch);
+            stem.push('_');
+        } else if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            stem.push(ch);
+        } else {
+            stem.push('_');
+        }
+    }
+    let taken: std::collections::HashSet<&str> = contents
+        .values()
+        .filter_map(|v| v.as_string())
+        .collect();
+    let mut candidate = format!("{stem}.glif");
+    let mut n = 1;
+    while taken.contains(candidate.as_str()) {
+        candidate = format!("{stem}.{n:03}.glif");
+        n += 1;
+    }
+    candidate
+}
+
+
+#[cfg(test)]
+mod surgical_tests {
+    use super::*;
+    use crate::model::outline::{Contour, Outline, OutlinePoint, PointKind};
+
+    fn square(x0: f64, y0: f64, s: f64, ccw: bool) -> Contour {
+        let mut pts = vec![
+            (x0, y0),
+            (x0 + s, y0),
+            (x0 + s, y0 + s),
+            (x0, y0 + s),
+        ];
+        if !ccw {
+            pts.reverse();
+        }
+        Contour {
+            points: pts
+                .into_iter()
+                .map(|(x, y)| OutlinePoint {
+                    x,
+                    y,
+                    kind: PointKind::Line,
+                    smooth: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn fix_directions_orients_by_nesting() {
+        // outer CW (wrong), hole CCW (wrong), island inside hole CW (wrong)
+        let mut o = Outline {
+            contours: vec![
+                square(0.0, 0.0, 100.0, false),
+                square(10.0, 10.0, 80.0, true),
+                square(20.0, 20.0, 40.0, false),
+            ],
+        };
+        o.fix_directions();
+        assert!(o.contours[0].signed_area() > 0.0, "outer must be CCW");
+        assert!(o.contours[1].signed_area() < 0.0, "hole must be CW");
+        assert!(o.contours[2].signed_area() > 0.0, "island must be CCW");
+    }
+
+    #[test]
+    fn reverse_moves_segment_types_and_keeps_smooth() {
+        use PointKind::*;
+        // line into A, cubic (2 offs) into B: after reversal the cubic
+        // arrives at A and the line at B.
+        let mk = |x: f64, y: f64, kind, smooth| OutlinePoint { x, y, kind, smooth };
+        let mut c = Contour {
+            points: vec![
+                mk(0.0, 0.0, Line, false),        // A
+                mk(1.0, 0.0, OffCurve, false),
+                mk(2.0, 0.0, OffCurve, false),
+                mk(3.0, 0.0, Curve, true),        // B
+            ],
+        };
+        c.reverse();
+        let kinds: Vec<PointKind> =
+            c.points.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds.iter().filter(|k| **k == OffCurve).count(), 2);
+        let a = c.points.iter().find(|p| p.x == 0.0 && p.y == 0.0).unwrap();
+        let b = c.points.iter().find(|p| p.x == 3.0 && p.y == 0.0).unwrap();
+        assert_eq!(a.kind, Curve, "cubic now arrives at A");
+        assert_eq!(b.kind, Line, "line now arrives at B");
+        assert!(b.smooth, "smooth stays with its point");
+    }
+
+    #[test]
+    fn surgical_write_touches_only_glyph_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let ufo = dir.path().join("T.ufo");
+        let mut font = norad::Font::new();
+        font.font_info.family_name = Some("T".into());
+        let mut g = Glyph::new("a");
+        g.width = 500.0;
+        font.default_layer_mut().insert_glyph(g);
+        font.save(&ufo).unwrap();
+        let fontinfo = ufo.join("fontinfo.plist");
+        let before = std::fs::read(&fontinfo).unwrap();
+        let mtime = std::fs::metadata(&fontinfo).unwrap().modified().unwrap();
+
+        let mut g2 = Glyph::new("b");
+        g2.width = 640.0;
+        write_glyph_surgical(&ufo, &g2).unwrap();
+
+        assert_eq!(std::fs::read(&fontinfo).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&fontinfo).unwrap().modified().unwrap(),
+            mtime,
+            "fontinfo must not be rewritten"
+        );
+        let contents: plist::Dictionary =
+            plist::from_file(ufo.join("glyphs/contents.plist")).unwrap();
+        assert!(contents.contains_key("b"));
+        let f = norad::Font::load(&ufo).unwrap();
+        assert!(f.default_layer().get_glyph("b").is_some());
+    }
+}
