@@ -151,6 +151,34 @@ pub fn trace(
     trace_luma(raw, opts, t_start)
 }
 
+/// Trace raw 8-bit grayscale pixels (row-major, `width * height`
+/// bytes) into a font-ready [`Outline`].
+///
+/// [`trace`] without the image-container decode: for callers that
+/// already hold a rendered bitmap (e.g. a signed-distance field
+/// sampled to a coverage ramp), this skips the PNG round trip.
+///
+/// # Errors
+///
+/// [`TraceError::ImageLoad`] if `pixels` is not `width * height`
+/// bytes; [`TraceError::NoContours`] if thresholding finds no ink.
+pub fn trace_gray(
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    opts: &TraceOptions,
+) -> Result<Outline, TraceError> {
+    let t_start = trace_timer_now();
+    let raw = image::GrayImage::from_raw(width, height, pixels).ok_or_else(|| {
+        TraceError::ImageLoad(image::ImageError::Parameter(
+            image::error::ParameterError::from_kind(
+                image::error::ParameterErrorKind::DimensionMismatch,
+            ),
+        ))
+    })?;
+    trace_luma(raw, opts, t_start)
+}
+
 /// Measure no-reference [`ImageStats`] for raw image bytes.
 ///
 /// Decodes like [`trace`]. Reports the input's character without tracing —
