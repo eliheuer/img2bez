@@ -225,7 +225,7 @@ fn log_load(dims: (u32, u32), pipeline: &str, config: &TraceOptions) {
     }
 }
 
-fn finish_trace(
+pub(crate) fn finish_trace(
     curves: Vec<BezPath>,
     dims: (u32, u32),
     config: &TraceOptions,

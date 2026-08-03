@@ -77,7 +77,21 @@ pub fn extract_iso_contours(
         let luma = img.get_pixel(x as u32, y as u32).0[0] as f64;
         if invert { luma - iso } else { iso - luma }
     };
+    extract_iso_contours_fn(w, h, &field, min_area_px)
+}
 
+/// Extract closed iso-contours of an arbitrary signed field sampled
+/// on a `w`x`h` grid: `field(x, y)` is positive inside ink, and the
+/// boundary is its zero iso-line. Out-of-range samples must return
+/// background (negative). This is [`extract_iso_contours`] without
+/// the image: signed-distance fields and other analytic sources
+/// trace directly, with no raster intermediate.
+pub fn extract_iso_contours_fn(
+    w: i32,
+    h: i32,
+    field: &dyn Fn(i32, i32) -> f64,
+    min_area_px: f64,
+) -> Vec<SubpixelContour> {
     // Sub-pixel crossing point on an edge, in image coordinates (y-down,
     // pixel centers at integer + 0.5).
     let crossing = |key: EdgeKey| -> (f64, f64) {

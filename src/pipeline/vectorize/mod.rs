@@ -83,17 +83,30 @@ pub fn trace_subpixel(
 
     let contours = glyph_contours(gray, threshold, config, min_area);
 
+    // Optional raster-loss refinement target (see `refine`).
+    let raster = config
+        .refine_raster
+        .then(|| refine::RasterTarget::new(gray, config.invert, 1.0 / scale));
+
+    fit_contours(&contours, image_height, config, raster.as_ref())
+}
+
+/// Fit contours (from any source: image extraction or a signed field)
+/// into bezier paths in neutral em space. `image_height` sets the
+/// px-to-em scale exactly as in [`trace_subpixel`].
+pub(crate) fn fit_contours(
+    contours: &[subpixel::SubpixelContour],
+    image_height: u32,
+    config: &TraceOptions,
+    raster: Option<&refine::RasterTarget>,
+) -> Vec<BezPath> {
+    let height = image_height as f64;
+    let scale = config.em_height / height;
     // Fitting accuracy in pixels: type quality favors minimal points over
     // pixel-perfect tracking, so allow a couple of pixels of deviation.
     let accuracy = (config.fit_accuracy / scale).clamp(0.5, 3.0);
     // Scale only — neutral em space, no baseline shift.
     let transform = Affine::scale(scale);
-
-    // Optional raster-loss refinement target (see `refine`).
-    let raster = config
-        .refine_raster
-        .then(|| refine::RasterTarget::new(gray, config.invert, 1.0 / scale));
-    let raster = raster.as_ref();
 
     #[cfg(feature = "parallel")]
     let paths: Vec<BezPath> = contours

@@ -179,6 +179,64 @@ pub fn trace_gray(
     trace_luma(raw, opts, t_start)
 }
 
+/// Trace a signed field directly: `field` is row-major
+/// `width * height` samples, positive inside ink, with the outline at
+/// the zero iso-surface (e.g. a signed-distance field). The field is
+/// sampled bilinearly at `supersample`x density so the curve fitters
+/// see their tuned working resolution, but no raster is ever
+/// materialized: every crossing comes from the field itself, and the
+/// u8 quantization of an image round trip never happens.
+///
+/// The supersampled height maps to `opts.em_height`, like [`trace`].
+/// Preprocessing (threshold resolution, pre-blur, resolution
+/// recovery) does not apply: a field has an exact iso and no scan
+/// artifacts.
+///
+/// # Errors
+///
+/// [`TraceError::NoContours`] if the field has no ink at the zero
+/// level.
+pub fn trace_sdf(
+    width: usize,
+    height: usize,
+    field: &[f32],
+    supersample: usize,
+    opts: &TraceOptions,
+) -> Result<Outline, TraceError> {
+    let t_start = trace_timer_now();
+    let s = supersample.max(1) as i32;
+    let (w, h) = (width as i32, height as i32);
+    let (vw, vh) = (w * s, h * s);
+    let sample = move |x: i32, y: i32| -> f64 {
+        if x < 0 || y < 0 || x >= vw || y >= vh || w == 0 || h == 0 {
+            return -1.0;
+        }
+        // virtual grid -> source coords, matching bilinear upsampling
+        let fx = ((x as f64 + 0.5) / s as f64 - 0.5).max(0.0);
+        let fy = ((y as f64 + 0.5) / s as f64 - 0.5).max(0.0);
+        let x0 = (fx.floor() as i32).min(w - 1);
+        let y0 = (fy.floor() as i32).min(h - 1);
+        let x1 = (x0 + 1).min(w - 1);
+        let y1 = (y0 + 1).min(h - 1);
+        let tx = (fx - x0 as f64).clamp(0.0, 1.0);
+        let ty = (fy - y0 as f64).clamp(0.0, 1.0);
+        let at = |xx: i32, yy: i32| field[(yy * w + xx) as usize] as f64;
+        let a = at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx;
+        let b = at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx;
+        a * (1.0 - ty) + b * ty
+    };
+    let scale = opts.em_height / vh as f64;
+    let min_area = (opts.min_contour_area / (scale * scale)).max(2.0);
+    let contours = pipeline::vectorize::subpixel::extract_iso_contours_fn(
+        vw, vh, &sample, min_area,
+    );
+    let curves = pipeline::vectorize::fit_contours(&contours, vh as u32, opts, None);
+    let mut outline =
+        pipeline::preprocess::finish_trace(curves, (vw as u32, vh as u32), opts, t_start)?;
+    outline.normalize_starts(opts.rtl_start);
+    Ok(outline)
+}
+
 /// Measure no-reference [`ImageStats`] for raw image bytes.
 ///
 /// Decodes like [`trace`]. Reports the input's character without tracing —
