@@ -38,6 +38,11 @@ pub fn process(paths: &[BezPath], config: &TraceOptions) -> Vec<BezPath> {
         result = direction::fix_directions(&result);
     }
 
+    // Faithful mode: the contour is the truth; no design cleanup.
+    if config.faithful {
+        return result;
+    }
+
     result = result
         .iter()
         .map(straighten::flatten_straight_runs)

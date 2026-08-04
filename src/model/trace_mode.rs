@@ -25,6 +25,9 @@ pub fn apply(outline: Outline, mode: TraceMode, keep_corner_deg: f64) -> Outline
                 .map(|c| smoothify(c, keep_corner_deg))
                 .collect(),
         },
+        TraceMode::SmoothG2 => Outline {
+            contours: outline.contours.iter().map(spline_g2).collect(),
+        },
         TraceMode::LineOnly => Outline {
             contours: outline.contours.iter().map(linify).collect(),
         },
@@ -106,6 +109,111 @@ fn smoothify(c: &Contour, keep_corner_deg: f64) -> Contour {
         points.push(off(s[2]));
         if i < n - 1 {
             points.push(on(s[3]));
+        }
+    }
+    Contour { points }
+}
+
+/// Re-spline the contour as a periodic natural cubic spline through
+/// its on-curve points: C2 (curvature-continuous) everywhere, every
+/// point smooth, one cubic bezier per knot interval. The spline
+/// interpolates the knots exactly; deviation between knots is bounded
+/// by knot density, so tight fits stay faithful.
+fn spline_g2(c: &Contour) -> Contour {
+    let segs = cubic_segs(c);
+    // knots: the on-curve ring, deduped of coincident neighbours
+    let mut knots: Vec<Point> = Vec::with_capacity(segs.len());
+    for s in &segs {
+        if knots.last().map_or(true, |l: &Point| (*l - s[0]).hypot() > 1e-6) {
+            knots.push(s[0]);
+        }
+    }
+    if knots.len() > 1
+        && (knots[0] - *knots.last().unwrap()).hypot() <= 1e-6
+    {
+        knots.pop();
+    }
+    let n = knots.len();
+    if n < 3 {
+        return smoothify(c, 180.0);
+    }
+
+    // chord-length steps, cyclic
+    let h: Vec<f64> = (0..n)
+        .map(|i| (knots[(i + 1) % n] - knots[i]).hypot().max(1e-6))
+        .collect();
+
+    // periodic natural cubic spline second derivatives, per axis
+    let solve = |vals: &dyn Fn(usize) -> f64| -> Vec<f64> {
+        // cyclic tridiagonal via Sherman-Morrison
+        let a: Vec<f64> = (0..n).map(|i| h[(i + n - 1) % n]).collect(); // sub
+        let b: Vec<f64> = (0..n).map(|i| 2.0 * (h[(i + n - 1) % n] + h[i])).collect();
+        let c_: Vec<f64> = h.clone(); // super
+        let d: Vec<f64> = (0..n)
+            .map(|i| {
+                let prev = (i + n - 1) % n;
+                let next = (i + 1) % n;
+                6.0 * ((vals(next) - vals(i)) / h[i] - (vals(i) - vals(prev)) / h[prev])
+            })
+            .collect();
+        // Solve cyclic system B m = d where B has corners a[0], c[n-1].
+        let tri = |b: &[f64], d: &[f64]| -> Vec<f64> {
+            let mut cp = vec![0.0; n];
+            let mut dp = vec![0.0; n];
+            cp[0] = c_[0] / b[0];
+            dp[0] = d[0] / b[0];
+            for i in 1..n {
+                let m = b[i] - a[i] * cp[i - 1];
+                cp[i] = c_[i] / m;
+                dp[i] = (d[i] - a[i] * dp[i - 1]) / m;
+            }
+            let mut x = vec![0.0; n];
+            x[n - 1] = dp[n - 1];
+            for i in (0..n - 1).rev() {
+                x[i] = dp[i] - cp[i] * x[i + 1];
+            }
+            x
+        };
+        let gamma = -b[0];
+        let mut bb = b.clone();
+        bb[0] = b[0] - gamma;
+        bb[n - 1] = b[n - 1] - a[0] * c_[n - 1] / gamma;
+        // u vector: gamma at 0, c[n-1] at n-1
+        let mut u = vec![0.0; n];
+        u[0] = gamma;
+        u[n - 1] = c_[n - 1];
+        // The cyclic terms couple rows 0 and n-1; classic S-M solve:
+        let x = tri(&bb, &d);
+        let z = tri(&bb, &u);
+        let fact = (x[0] + a[0] * x[n - 1] / gamma)
+            / (1.0 + z[0] + a[0] * z[n - 1] / gamma);
+        (0..n).map(|i| x[i] - fact * z[i]).collect()
+    };
+    let xs: Vec<f64> = knots.iter().map(|p| p.x).collect();
+    let ys: Vec<f64> = knots.iter().map(|p| p.y).collect();
+    let mx = solve(&|i| xs[i]);
+    let my = solve(&|i| ys[i]);
+
+    // emit one cubic per interval from endpoint first derivatives
+    let mut points: Vec<OutlinePoint> = Vec::with_capacity(n * 3);
+    points.push(on(knots[0]));
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let hi = h[i];
+        let p0 = knots[i];
+        let p1 = knots[j];
+        let d0 = kurbo::Vec2::new(
+            (p1.x - p0.x) / hi - hi * (2.0 * mx[i] + mx[j]) / 6.0,
+            (p1.y - p0.y) / hi - hi * (2.0 * my[i] + my[j]) / 6.0,
+        );
+        let d1 = kurbo::Vec2::new(
+            (p1.x - p0.x) / hi + hi * (mx[i] + 2.0 * mx[j]) / 6.0,
+            (p1.y - p0.y) / hi + hi * (my[i] + 2.0 * my[j]) / 6.0,
+        );
+        points.push(off(p0 + d0 * (hi / 3.0)));
+        points.push(off(p1 - d1 * (hi / 3.0)));
+        if i < n - 1 {
+            points.push(on(p1));
         }
     }
     Contour { points }

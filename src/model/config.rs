@@ -34,6 +34,12 @@ pub enum TraceMode {
     /// tangent-continuous, all-curves outline for organic forms (no corners,
     /// no straight lines). Built by re-splining through the structural points.
     Smooth,
+    /// Curvature-continuous (G2) all-curves outline: a periodic natural
+    /// cubic spline through the fitted on-curve points, emitted as one
+    /// cubic bezier per knot interval. Every point is smooth and the
+    /// curvature never jumps. Fidelity follows knot density, so pair
+    /// with a tight `fit_accuracy`.
+    SmoothG2,
     /// Every segment is a straight line and there are no off-curve points — a
     /// polygonal outline (the curves flattened to a tolerance).
     LineOnly,
@@ -234,6 +240,14 @@ pub struct TraceOptions {
     /// become small rounded caps rather than loops).
     pub smooth_keep_corner_deg: f64,
 
+    /// Faithful mode: fit the extracted contour and stop. Skips the
+    /// type-design cleanup (straight-run flattening, redundant-point
+    /// removal, grid and H/V snapping, inflection surgery); only
+    /// contour direction is still normalized. For sources where the
+    /// contour IS the truth -- live signed-field rendering, display
+    /// tracing -- rather than scans being digitized into a font.
+    pub faithful: bool,
+
     /// Grid size for coordinate snapping. 0 = no snapping.
     pub grid: i32,
     /// Coarse structure grid for the dyadic self-labeling snap (0 = off, the
@@ -362,6 +376,7 @@ impl Default for TraceOptions {
             auto_pre_blur: true,
             smoothing: 1.0,
             smooth_keep_corner_deg: 180.0,
+            faithful: false,
             corner_threshold_deg: 12.0,
             mode: TraceMode::Default,
 
