@@ -281,6 +281,11 @@ pub(crate) fn finish_trace(
         );
     }
 
+    // SmoothG2 is realized at fit time (dense contour splining);
+    // re-applying the knot-based post-pass would undo its fidelity.
+    if config.mode == crate::model::config::TraceMode::SmoothG2 {
+        return Ok(Outline::from_bezpaths(&paths));
+    }
     Ok(trace_mode::apply(
         Outline::from_bezpaths(&paths),
         config.mode,
