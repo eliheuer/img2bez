@@ -108,12 +108,17 @@ pub(crate) fn fit_contours(
     // fitter's sparse structural points.
     if config.mode == crate::model::config::TraceMode::SmoothG2 {
         let accuracy_px = (config.fit_accuracy / scale).clamp(0.5, 3.0);
-        let spacing = (accuracy_px * 4.0).max(3.0);
+        // `smoothing` scales the arc-length low-pass: 0 interpolates
+        // the raw contour (maximum detail, maximum wobble); larger
+        // values relax the curve. Knot spacing follows the smoothing
+        // radius so knots do not chase noise the filter removed.
+        let sigma = (config.smoothing * 2.0).max(0.0);
+        let spacing = (accuracy_px * 4.0).max(3.0).max(sigma * 1.5);
         let transform = Affine::scale(scale);
         return contours
             .iter()
             .filter_map(|c| {
-                let mut p = spline_g2_contour(&c.points, spacing)?;
+                let mut p = spline_g2_contour(&c.points, spacing, sigma)?;
                 p.apply_affine(transform);
                 Some(p)
             })
@@ -168,7 +173,7 @@ pub(crate) fn fit_contours(
 /// a periodic natural cubic spline through the samples: C2 curvature
 /// continuity, every point smooth, and fidelity pinned by the sample
 /// density. Returns None for degenerate contours.
-fn spline_g2_contour(points: &[(f64, f64)], spacing: f64) -> Option<BezPath> {
+fn spline_g2_contour(points: &[(f64, f64)], spacing: f64, sigma: f64) -> Option<BezPath> {
     use kurbo::{Point, Vec2};
     if points.len() < 4 {
         return None;
@@ -186,6 +191,67 @@ fn spline_g2_contour(points: &[(f64, f64)], spacing: f64) -> Option<BezPath> {
     if perimeter < spacing * 3.0 {
         return None;
     }
+    // Low-pass the polyline along its arc before knot placement: a
+    // circular Gaussian with radius `sigma` (px), attenuated on small
+    // contours so dots and tight counters keep their form.
+    let sigma = sigma.min(perimeter / 40.0);
+    let smoothed: Vec<(f64, f64)>;
+    let points: &[(f64, f64)] = if sigma > 0.05 {
+        // resample fine first so the kernel is uniform in arc length
+        let fine_step = (sigma / 2.0).clamp(0.5, 2.0);
+        let nf = ((perimeter / fine_step).round() as usize).max(16);
+        let stepf = perimeter / nf as f64;
+        let mut fine: Vec<(f64, f64)> = Vec::with_capacity(nf);
+        {
+            let mut seg = 0usize;
+            let mut into = 0.0f64;
+            let mut acc = 0.0f64;
+            for _ in 0..nf {
+                while acc > seg_len[seg] - into {
+                    acc -= seg_len[seg] - into;
+                    into = 0.0;
+                    seg = (seg + 1) % n_in;
+                }
+                into += acc;
+                acc = stepf;
+                let a = points[seg];
+                let b = points[(seg + 1) % n_in];
+                let t = if seg_len[seg] > 1e-9 { into / seg_len[seg] } else { 0.0 };
+                fine.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+            }
+        }
+        let half = ((sigma * 3.0 / stepf).ceil() as isize).max(1);
+        let s2 = 2.0 * sigma * sigma;
+        smoothed = (0..nf as isize)
+            .map(|i| {
+                let mut wx = 0.0;
+                let mut wy = 0.0;
+                let mut ws = 0.0;
+                for k in -half..=half {
+                    let j = (i + k).rem_euclid(nf as isize) as usize;
+                    let d = k as f64 * stepf;
+                    let w = (-d * d / s2).exp();
+                    wx += fine[j].0 * w;
+                    wy += fine[j].1 * w;
+                    ws += w;
+                }
+                (wx / ws, wy / ws)
+            })
+            .collect();
+        &smoothed
+    } else {
+        points
+    };
+    // recompute segment lengths over the (possibly smoothed) polyline
+    let n_in = points.len();
+    let seg_len: Vec<f64> = (0..n_in)
+        .map(|i| {
+            let a = points[i];
+            let b = points[(i + 1) % n_in];
+            ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
+        })
+        .collect();
+    let perimeter: f64 = seg_len.iter().sum();
     let n = ((perimeter / spacing).round() as usize).max(8);
     let step = perimeter / n as f64;
     let mut knots: Vec<Point> = Vec::with_capacity(n);
