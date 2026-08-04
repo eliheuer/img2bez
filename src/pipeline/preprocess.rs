@@ -284,6 +284,7 @@ pub(crate) fn finish_trace(
     Ok(trace_mode::apply(
         Outline::from_bezpaths(&paths),
         config.mode,
+        config.smooth_keep_corner_deg,
     ))
 }
 

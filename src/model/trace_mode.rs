@@ -15,11 +15,15 @@ use crate::model::outline::{Contour, Outline, OutlinePoint, PointKind};
 const LINE_TOL: f64 = 1.0;
 
 /// Apply the output-shape constraint of `mode` to `outline`.
-pub fn apply(outline: Outline, mode: TraceMode) -> Outline {
+pub fn apply(outline: Outline, mode: TraceMode, keep_corner_deg: f64) -> Outline {
     match mode {
         TraceMode::Default => outline,
         TraceMode::Smooth => Outline {
-            contours: outline.contours.iter().map(smoothify).collect(),
+            contours: outline
+                .contours
+                .iter()
+                .map(|c| smoothify(c, keep_corner_deg))
+                .collect(),
         },
         TraceMode::LineOnly => Outline {
             contours: outline.contours.iter().map(linify).collect(),
@@ -52,10 +56,13 @@ fn cubic_segs(c: &Contour) -> Vec<[Point; 4]> {
         .collect()
 }
 
-/// Make every on-curve point a smooth cubic join: at each vertex align both
-/// handles to the averaged tangent (G1), preserving handle lengths; lines
-/// become straight cubics that flow into their neighbours.
-fn smoothify(c: &Contour) -> Contour {
+/// Make on-curve points smooth cubic joins: at each vertex align both
+/// handles to the averaged tangent (G1), preserving handle lengths;
+/// lines become straight cubics that flow into their neighbours. A
+/// vertex whose direction turns more than `keep_corner_deg` keeps its
+/// corner: taper tips and hard junctions reverse direction, and
+/// forcing them smooth inverts the outline into loops.
+fn smoothify(c: &Contour, keep_corner_deg: f64) -> Contour {
     let mut segs = cubic_segs(c);
     let n = segs.len();
     if n < 2 {
@@ -70,14 +77,24 @@ fn smoothify(c: &Contour) -> Contour {
         if lin < 1e-6 || lout < 1e-6 {
             continue;
         }
+        let cos_turn = (din / lin).dot(dout / lout);
+        if cos_turn < (keep_corner_deg.to_radians()).cos() {
+            continue; // turns harder than the threshold — keep the corner
+        }
         let t = din / lin + dout / lout;
         let tl = t.hypot();
         if tl < 1e-9 {
-            continue; // opposing tangents (a true cusp) — leave it
+            continue; // exactly opposing tangents — leave it
         }
         let dir = t / tl;
-        segs[prev][2] = p - dir * lin;
-        segs[i][1] = p + dir * lout;
+        // Attenuate handle length as the turn sharpens: long handles
+        // along the (unstable) averaged direction of a near-reversal
+        // invert the outline into loops. cos(turn/2) is 1 for a
+        // straight-through join and 0 at a full reversal, so tips
+        // become small rounded caps and stay smooth.
+        let scale = ((1.0 + cos_turn.clamp(-1.0, 1.0)) * 0.5).sqrt();
+        segs[prev][2] = p - dir * (lin * scale);
+        segs[i][1] = p + dir * (lout * scale);
     }
 
     // Rebuild as a UFO ring of smooth curve points; the closing segment's
@@ -163,7 +180,7 @@ mod tests {
 
     #[test]
     fn smooth_makes_every_point_a_smooth_curve() {
-        let out = apply(square(), TraceMode::Smooth);
+        let out = apply(square(), TraceMode::Smooth, 180.0);
         let pts = &out.contours[0].points;
         // every on-curve point is a smooth curve point; the rest are off-curve.
         for p in pts {
@@ -191,7 +208,7 @@ mod tests {
         p.curve_to((22.0, 100.0), (0.0, 78.0), (0.0, 50.0));
         p.curve_to((0.0, 22.0), (22.0, 0.0), (50.0, 0.0));
         p.close_path();
-        let out = apply(Outline::from_bezpaths(&[p]), TraceMode::LineOnly);
+        let out = apply(Outline::from_bezpaths(&[p]), TraceMode::LineOnly, 180.0);
         let pts = &out.contours[0].points;
         assert!(pts.iter().all(|p| p.kind == PointKind::Line));
         // a flattened quarter-circle yields several segments, not 4.
@@ -201,6 +218,6 @@ mod tests {
     #[test]
     fn default_is_unchanged() {
         let sq = square();
-        assert_eq!(apply(sq.clone(), TraceMode::Default), sq);
+        assert_eq!(apply(sq.clone(), TraceMode::Default, 180.0), sq);
     }
 }

@@ -225,6 +225,15 @@ pub struct TraceOptions {
     pub em_height: f64,
 
     // -- Post-processing --
+    /// Optional corner preservation for [`TraceMode::Smooth`]: a
+    /// vertex whose tangent direction turns by more than this many
+    /// degrees keeps its corner instead of being forced smooth. The
+    /// default (180) preserves nothing: Smooth stays all-curves, and
+    /// near-reversal vertices are protected by handle attenuation
+    /// instead (handles shrink as the turn sharpens, so taper tips
+    /// become small rounded caps rather than loops).
+    pub smooth_keep_corner_deg: f64,
+
     /// Grid size for coordinate snapping. 0 = no snapping.
     pub grid: i32,
     /// Coarse structure grid for the dyadic self-labeling snap (0 = off, the
@@ -352,6 +361,7 @@ impl Default for TraceOptions {
             pre_blur: 0.0,
             auto_pre_blur: true,
             smoothing: 1.0,
+            smooth_keep_corner_deg: 180.0,
             corner_threshold_deg: 12.0,
             mode: TraceMode::Default,
 
