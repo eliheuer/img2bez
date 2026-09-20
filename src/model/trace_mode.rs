@@ -15,7 +15,11 @@ use crate::model::outline::{Contour, Outline, OutlinePoint, PointKind};
 const LINE_TOL: f64 = 1.0;
 
 /// Apply the output-shape constraint of `mode` to `outline`.
-pub fn apply(outline: Outline, mode: TraceMode, keep_corner_deg: f64) -> Outline {
+pub fn apply(
+    outline: Outline,
+    mode: TraceMode,
+    keep_corner_deg: f64,
+) -> Outline {
     match mode {
         TraceMode::Default => outline,
         TraceMode::Smooth => Outline {
@@ -124,13 +128,14 @@ fn spline_g2(c: &Contour) -> Contour {
     // knots: the on-curve ring, deduped of coincident neighbours
     let mut knots: Vec<Point> = Vec::with_capacity(segs.len());
     for s in &segs {
-        if knots.last().map_or(true, |l: &Point| (*l - s[0]).hypot() > 1e-6) {
+        if knots
+            .last()
+            .is_none_or(|l: &Point| (*l - s[0]).hypot() > 1e-6)
+        {
             knots.push(s[0]);
         }
     }
-    if knots.len() > 1
-        && (knots[0] - *knots.last().unwrap()).hypot() <= 1e-6
-    {
+    if knots.len() > 1 && (knots[0] - *knots.last().unwrap()).hypot() <= 1e-6 {
         knots.pop();
     }
     let n = knots.len();
@@ -147,13 +152,15 @@ fn spline_g2(c: &Contour) -> Contour {
     let solve = |vals: &dyn Fn(usize) -> f64| -> Vec<f64> {
         // cyclic tridiagonal via Sherman-Morrison
         let a: Vec<f64> = (0..n).map(|i| h[(i + n - 1) % n]).collect(); // sub
-        let b: Vec<f64> = (0..n).map(|i| 2.0 * (h[(i + n - 1) % n] + h[i])).collect();
+        let b: Vec<f64> =
+            (0..n).map(|i| 2.0 * (h[(i + n - 1) % n] + h[i])).collect();
         let c_: Vec<f64> = h.clone(); // super
         let d: Vec<f64> = (0..n)
             .map(|i| {
                 let prev = (i + n - 1) % n;
                 let next = (i + 1) % n;
-                6.0 * ((vals(next) - vals(i)) / h[i] - (vals(i) - vals(prev)) / h[prev])
+                6.0 * ((vals(next) - vals(i)) / h[i]
+                    - (vals(i) - vals(prev)) / h[prev])
             })
             .collect();
         // Solve cyclic system B m = d where B has corners a[0], c[n-1].
@@ -316,7 +323,8 @@ mod tests {
         p.curve_to((22.0, 100.0), (0.0, 78.0), (0.0, 50.0));
         p.curve_to((0.0, 22.0), (22.0, 0.0), (50.0, 0.0));
         p.close_path();
-        let out = apply(Outline::from_bezpaths(&[p]), TraceMode::LineOnly, 180.0);
+        let out =
+            apply(Outline::from_bezpaths(&[p]), TraceMode::LineOnly, 180.0);
         let pts = &out.contours[0].points;
         assert!(pts.iter().all(|p| p.kind == PointKind::Line));
         // a flattened quarter-circle yields several segments, not 4.

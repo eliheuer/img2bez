@@ -83,6 +83,21 @@ input hash); options are per call; a lean build
 dependencies. [WASM bindings](wasm/) run the identical pipeline in the
 browser; [mcp/](mcp/) exposes it to AI agents as an MCP server.
 
+## Boundaries from procedural sources
+
+For smooth procedural shapes, `fit_smooth_contours` accepts ordered `BoundarySample` values in font coordinates and returns the same `Outline` used by image tracing.
+Each sample supplies a position and forward tangent; `BoundaryFeature` marks extrema and inflections that must remain nodes.
+The caller extracts the boundary and identifies its features, while img2bez fits the cubic spans with Kurbo and preserves exact horizontal or vertical handles at extrema.
+This avoids discarding known geometry through a raster intermediate.
+It is useful for metaballs and other implicit curves with available derivatives.
+
+`trace_sdf` remains the scalar-grid entry point when only field samples are available.
+For either image or scalar-field tracing, `TraceOptions::cleanup_max_deviation = Some(0.25)` limits sampled cleanup displacement from the fitted outline to 0.25 font units.
+The check is symmetric and compares every stage against the original fitted contour, so repeated cleanup passes cannot accumulate accepted shifts.
+It retains the preceding contour when a candidate exceeds the budget.
+This is a sampled cleanup check, not a bound on total error against the input image or analytic field.
+The default `None` preserves the existing profile cleanup behavior.
+
 ## How it works
 
 ```

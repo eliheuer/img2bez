@@ -248,6 +248,15 @@ pub struct TraceOptions {
     /// tracing -- rather than scans being digitized into a font.
     pub faithful: bool,
 
+    /// Optional sampled displacement limit for type-design cleanup, in font units.
+    /// Each pass is compared in both directions against the fitted outline before
+    /// cleanup, so changes cannot accumulate across passes.
+    /// Candidates beyond the limit retain the previously accepted contour.
+    /// This is a sampled check, not a Hausdorff bound or a total tracing-error bound.
+    /// None (the default) keeps the profile's existing cleanup budgets.
+    /// Use a finite nonnegative value; invalid values reject geometric cleanup.
+    pub cleanup_max_deviation: Option<f64>,
+
     /// Grid size for coordinate snapping. 0 = no snapping.
     pub grid: i32,
     /// Coarse structure grid for the dyadic self-labeling snap (0 = off, the
@@ -377,6 +386,7 @@ impl Default for TraceOptions {
             smoothing: 1.0,
             smooth_keep_corner_deg: 180.0,
             faithful: false,
+            cleanup_max_deviation: None,
             corner_threshold_deg: 12.0,
             mode: TraceMode::Default,
 

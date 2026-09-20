@@ -396,6 +396,10 @@ mod tests {
         assert_eq!(pts[0], Point::new(8.0, 96.0));
         // Point in the mid-zone stays off the 8-grid (correction).
         assert_eq!(pts[1], Point::new(12.0, 14.0));
-        assert_ne!(pts[1].x % 8.0, 0.0, "correction x should be off the 8-grid");
+        assert_ne!(
+            pts[1].x % 8.0,
+            0.0,
+            "correction x should be off the 8-grid"
+        );
     }
 }

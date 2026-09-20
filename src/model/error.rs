@@ -10,6 +10,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum TraceError {
+    /// Supplied boundary samples or their fitting accuracy are invalid.
+    #[error("invalid smooth boundary: {0}")]
+    InvalidBoundary(&'static str),
+
     /// The source image bytes could not be decoded.
     #[error("failed to decode image: {0}")]
     ImageLoad(#[from] image::ImageError),

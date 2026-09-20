@@ -139,7 +139,6 @@ pub(crate) fn to_contour(contour: &outline::Contour) -> Contour {
     Contour::new(points, None)
 }
 
-
 /// Insert or replace ONE glyph in an on-disk UFO by writing only its `.glif`
 /// (plus, for a brand-new glyph, the `glyphs/contents.plist` entry). Never
 /// re-serializes the rest of the font — a full `norad::Font::save` reformats
@@ -157,8 +156,12 @@ pub fn write_glyph_surgical(
     let glyphs_dir = ufo_path.join("glyphs");
     let contents_path = glyphs_dir.join("contents.plist");
     let mut contents: plist::Dictionary = plist::from_file(&contents_path)
-        .map_err(|e| TraceError::UfoWrite(format!(
-            "read {}: {e}", contents_path.display())))?;
+        .map_err(|e| {
+            TraceError::UfoWrite(format!(
+                "read {}: {e}",
+                contents_path.display()
+            ))
+        })?;
     let name = glyph.name().to_string();
     let file_name = match contents.get(&name).and_then(|v| v.as_string()) {
         Some(existing) => existing.to_string(),
@@ -167,7 +170,9 @@ pub fn write_glyph_surgical(
             contents.insert(name, plist::Value::String(fname.clone()));
             plist::to_file_xml(&contents_path, &contents).map_err(|e| {
                 TraceError::UfoWrite(format!(
-                    "write {}: {e}", contents_path.display()))
+                    "write {}: {e}",
+                    contents_path.display()
+                ))
             })?;
             fname
         }
@@ -194,10 +199,8 @@ fn glif_file_name(name: &str, contents: &plist::Dictionary) -> String {
             stem.push('_');
         }
     }
-    let taken: std::collections::HashSet<&str> = contents
-        .values()
-        .filter_map(|v| v.as_string())
-        .collect();
+    let taken: std::collections::HashSet<&str> =
+        contents.values().filter_map(|v| v.as_string()).collect();
     let mut candidate = format!("{stem}.glif");
     let mut n = 1;
     while taken.contains(candidate.as_str()) {
@@ -207,19 +210,14 @@ fn glif_file_name(name: &str, contents: &plist::Dictionary) -> String {
     candidate
 }
 
-
 #[cfg(test)]
 mod surgical_tests {
     use super::*;
     use crate::model::outline::{Contour, Outline, OutlinePoint, PointKind};
 
     fn square(x0: f64, y0: f64, s: f64, ccw: bool) -> Contour {
-        let mut pts = vec![
-            (x0, y0),
-            (x0 + s, y0),
-            (x0 + s, y0 + s),
-            (x0, y0 + s),
-        ];
+        let mut pts =
+            vec![(x0, y0), (x0 + s, y0), (x0 + s, y0 + s), (x0, y0 + s)];
         if !ccw {
             pts.reverse();
         }
@@ -257,18 +255,18 @@ mod surgical_tests {
         use PointKind::*;
         // line into A, cubic (2 offs) into B: after reversal the cubic
         // arrives at A and the line at B.
-        let mk = |x: f64, y: f64, kind, smooth| OutlinePoint { x, y, kind, smooth };
+        let mk =
+            |x: f64, y: f64, kind, smooth| OutlinePoint { x, y, kind, smooth };
         let mut c = Contour {
             points: vec![
-                mk(0.0, 0.0, Line, false),        // A
+                mk(0.0, 0.0, Line, false), // A
                 mk(1.0, 0.0, OffCurve, false),
                 mk(2.0, 0.0, OffCurve, false),
-                mk(3.0, 0.0, Curve, true),        // B
+                mk(3.0, 0.0, Curve, true), // B
             ],
         };
         c.reverse();
-        let kinds: Vec<PointKind> =
-            c.points.iter().map(|p| p.kind).collect();
+        let kinds: Vec<PointKind> = c.points.iter().map(|p| p.kind).collect();
         assert_eq!(kinds.iter().filter(|k| **k == OffCurve).count(), 2);
         let a = c.points.iter().find(|p| p.x == 0.0 && p.y == 0.0).unwrap();
         let b = c.points.iter().find(|p| p.x == 3.0 && p.y == 0.0).unwrap();

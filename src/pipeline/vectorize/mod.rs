@@ -7,6 +7,7 @@
 //! (`refine`). For master sets, `joint` replaces the per-image structural
 //! decisions with one plan decided across all masters.
 
+pub(crate) mod boundary;
 pub mod fit;
 pub mod joint;
 pub mod refine;
@@ -173,7 +174,11 @@ pub(crate) fn fit_contours(
 /// a periodic natural cubic spline through the samples: C2 curvature
 /// continuity, every point smooth, and fidelity pinned by the sample
 /// density. Returns None for degenerate contours.
-fn spline_g2_contour(points: &[(f64, f64)], spacing: f64, sigma: f64) -> Option<BezPath> {
+fn spline_g2_contour(
+    points: &[(f64, f64)],
+    spacing: f64,
+    sigma: f64,
+) -> Option<BezPath> {
     use kurbo::{Point, Vec2};
     if points.len() < 4 {
         return None;
@@ -216,7 +221,11 @@ fn spline_g2_contour(points: &[(f64, f64)], spacing: f64, sigma: f64) -> Option<
                 acc = stepf;
                 let a = points[seg];
                 let b = points[(seg + 1) % n_in];
-                let t = if seg_len[seg] > 1e-9 { into / seg_len[seg] } else { 0.0 };
+                let t = if seg_len[seg] > 1e-9 {
+                    into / seg_len[seg]
+                } else {
+                    0.0
+                };
                 fine.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
             }
         }
@@ -268,7 +277,11 @@ fn spline_g2_contour(points: &[(f64, f64)], spacing: f64, sigma: f64) -> Option<
         acc = step;
         let a = points[seg];
         let b = points[(seg + 1) % n_in];
-        let t = if seg_len[seg] > 1e-9 { into / seg_len[seg] } else { 0.0 };
+        let t = if seg_len[seg] > 1e-9 {
+            into / seg_len[seg]
+        } else {
+            0.0
+        };
         knots.push(Point::new(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
     }
 
@@ -279,13 +292,15 @@ fn spline_g2_contour(points: &[(f64, f64)], spacing: f64, sigma: f64) -> Option<
         .collect();
     let solve = |vals: &dyn Fn(usize) -> f64| -> Vec<f64> {
         let a: Vec<f64> = (0..m).map(|i| h[(i + m - 1) % m]).collect();
-        let b: Vec<f64> = (0..m).map(|i| 2.0 * (h[(i + m - 1) % m] + h[i])).collect();
+        let b: Vec<f64> =
+            (0..m).map(|i| 2.0 * (h[(i + m - 1) % m] + h[i])).collect();
         let c: Vec<f64> = h.clone();
         let d: Vec<f64> = (0..m)
             .map(|i| {
                 let prev = (i + m - 1) % m;
                 let next = (i + 1) % m;
-                6.0 * ((vals(next) - vals(i)) / h[i] - (vals(i) - vals(prev)) / h[prev])
+                6.0 * ((vals(next) - vals(i)) / h[i]
+                    - (vals(i) - vals(prev)) / h[prev])
             })
             .collect();
         let tri = |bb: &[f64], dd: &[f64]| -> Vec<f64> {

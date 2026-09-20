@@ -74,6 +74,9 @@ pub use font::refit;
 pub use io::ufo;
 pub use ml::judge;
 pub use pipeline::placement;
+pub use pipeline::vectorize::boundary::{
+    BoundaryFeature, BoundarySample, fit_smooth_contours,
+};
 
 // CLI/eval-harness support: public for the binary target, doc-hidden,
 // not covered by semver.
@@ -169,13 +172,14 @@ pub fn trace_gray(
     opts: &TraceOptions,
 ) -> Result<Outline, TraceError> {
     let t_start = trace_timer_now();
-    let raw = image::GrayImage::from_raw(width, height, pixels).ok_or_else(|| {
-        TraceError::ImageLoad(image::ImageError::Parameter(
-            image::error::ParameterError::from_kind(
-                image::error::ParameterErrorKind::DimensionMismatch,
-            ),
-        ))
-    })?;
+    let raw =
+        image::GrayImage::from_raw(width, height, pixels).ok_or_else(|| {
+            TraceError::ImageLoad(image::ImageError::Parameter(
+                image::error::ParameterError::from_kind(
+                    image::error::ParameterErrorKind::DimensionMismatch,
+                ),
+            ))
+        })?;
     trace_luma(raw, opts, t_start)
 }
 
@@ -230,9 +234,14 @@ pub fn trace_sdf(
     let contours = pipeline::vectorize::subpixel::extract_iso_contours_fn(
         vw, vh, &sample, min_area,
     );
-    let curves = pipeline::vectorize::fit_contours(&contours, vh as u32, opts, None);
-    let mut outline =
-        pipeline::preprocess::finish_trace(curves, (vw as u32, vh as u32), opts, t_start)?;
+    let curves =
+        pipeline::vectorize::fit_contours(&contours, vh as u32, opts, None);
+    let mut outline = pipeline::preprocess::finish_trace(
+        curves,
+        (vw as u32, vh as u32),
+        opts,
+        t_start,
+    )?;
     outline.normalize_starts(opts.rtl_start);
     Ok(outline)
 }
