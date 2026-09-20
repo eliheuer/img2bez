@@ -86,8 +86,9 @@ browser; [mcp/](mcp/) exposes it to AI agents as an MCP server.
 ## Boundaries from procedural sources
 
 For smooth procedural shapes, `fit_smooth_contours` accepts ordered `BoundarySample` values in font coordinates and returns the same `Outline` used by image tracing.
-Each sample supplies a position and forward tangent; `BoundaryFeature` marks extrema and inflections that must remain nodes.
-The caller extracts the boundary and identifies its features, while img2bez fits the cubic spans with Kurbo and preserves exact horizontal or vertical handles at extrema.
+Each sample supplies a position and forward tangent; `BoundaryFeature` marks required extrema and optional inflections.
+The caller extracts the boundary and identifies its features, while img2bez optimizes cubic segment count with Kurbo and preserves exact horizontal or vertical handles at extrema.
+A cubic can span an inflection without an extra node, and each contour starts at its lowest on-curve point (leftmost on a tie).
 This avoids discarding known geometry through a raster intermediate.
 It is useful for metaballs and other implicit curves with available derivatives.
 

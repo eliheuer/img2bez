@@ -7,7 +7,7 @@ use kurbo::{BezPath, Point, Vec2};
 
 use crate::{Outline, TraceError};
 
-/// A structural node retained when fitting a smooth boundary.
+/// A boundary feature used when fitting a smooth contour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BoundaryFeature {
@@ -15,7 +15,7 @@ pub enum BoundaryFeature {
     ExtremumX,
     /// Minimum or maximum y; both handles are exactly horizontal.
     ExtremumY,
-    /// Curvature sign change; retain the supplied tangent direction.
+    /// Curvature sign change; a cubic may span this without adding a node.
     Inflection,
 }
 
@@ -31,21 +31,24 @@ pub struct BoundarySample {
     pub position: [f64; 2],
     /// Forward tangent vector in the same coordinate system.
     pub tangent: [f64; 2],
-    /// A retained node, or None for an ordinary boundary sample.
+    /// An extremum to retain, an optional inflection, or an ordinary sample.
     pub feature: Option<BoundaryFeature>,
 }
 
 /// Fit ordered, closed smooth contours with source-supplied feature nodes.
 ///
 /// Each contour must contain at least three samples, at least two marked
-/// features, and distinct consecutive positions (including the closing pair).
+/// extrema, and distinct consecutive positions (including the closing pair).
 /// Do not repeat the first sample at the end.
 /// Positions, tangents, and `accuracy` must be finite; accuracy must be positive.
 /// The caller supplies enough samples to capture the shape and every feature.
-/// Winding, feature positions and fractional coordinates are preserved.
+/// Winding, extremum positions and fractional coordinates are preserved.
+/// Inflections may lie inside a cubic; they do not force extra on-curve points.
+/// Contours start at the lowest on-curve point, breaking ties to the left.
 /// No image cleanup, grid snapping, placement or direction normalization runs.
 ///
-/// Kurbo fits each span independently, retaining endpoint positions and tangents.
+/// Kurbo optimizes segment count between extrema, retaining endpoint positions
+/// and tangents instead of forcing a subdivision at every inflection.
 /// Accuracy is relative to the cubic Hermite interpolant of the samples;
 /// it is not an error bound against the source's underlying analytic curve.
 /// This entry point complements [`crate::trace_sdf`] when a source can provide
@@ -71,7 +74,9 @@ pub fn fit_smooth_contours(
         .iter()
         .map(|c| fit(c, accuracy))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Outline::from_bezpaths(&paths))
+    let mut outline = Outline::from_bezpaths(&paths);
+    outline.normalize_starts(false);
+    Ok(outline)
 }
 
 fn position(sample: BoundarySample) -> Point {
@@ -101,10 +106,21 @@ fn fit(
     accuracy: f64,
 ) -> Result<BezPath, TraceError> {
     if samples.len() < 3
-        || samples.iter().filter(|s| s.feature.is_some()).count() < 2
+        || samples
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.feature,
+                    Some(
+                        BoundaryFeature::ExtremumX | BoundaryFeature::ExtremumY
+                    )
+                )
+            })
+            .count()
+            < 2
     {
         return Err(TraceError::InvalidBoundary(
-            "need three samples and two features per contour",
+            "need three samples and two extrema per contour",
         ));
     }
     for (i, sample) in samples.iter().enumerate() {
@@ -128,13 +144,24 @@ fn fit(
     let mut samples = samples.to_vec();
     let first = samples
         .iter()
-        .position(|s| s.feature.is_some())
-        .expect("features validated above");
+        .position(|s| {
+            matches!(
+                s.feature,
+                Some(BoundaryFeature::ExtremumX | BoundaryFeature::ExtremumY)
+            )
+        })
+        .expect("extrema validated above");
     samples.rotate_left(first);
     let mut stops: Vec<_> = samples
         .iter()
         .enumerate()
-        .filter_map(|(i, s)| s.feature.map(|_| i))
+        .filter_map(|(i, s)| {
+            matches!(
+                s.feature,
+                Some(BoundaryFeature::ExtremumX | BoundaryFeature::ExtremumY)
+            )
+            .then_some(i)
+        })
         .collect();
     stops.push(samples.len());
     let mut output = BezPath::new();
@@ -162,7 +189,8 @@ fn fit(
         let fitted = kurbo::simplify::simplify_bezpath(
             span,
             accuracy,
-            &kurbo::simplify::SimplifyOptions::default(),
+            &kurbo::simplify::SimplifyOptions::default()
+                .opt_level(kurbo::simplify::SimplifyOptLevel::Optimize),
         );
         let mut cubics: Vec<_> =
             fitted.segments().map(|s| s.to_cubic()).collect();
