@@ -366,6 +366,11 @@ enum Mode {
     Default,
     /// Every on-curve point is a smooth curve point (organic, all-curves).
     Smooth,
+    /// Curvature-continuous (G2) all-curves outline: a periodic C2 spline
+    /// through a dense arc-length resample of the contour. Every point is
+    /// smooth and the trace stays faithful to the source; expect more
+    /// points than `smooth` (thin out afterwards if you need economy).
+    SmoothG2,
     /// Every segment is a straight line (no off-curve points).
     Line,
 }
@@ -375,6 +380,7 @@ impl From<Mode> for img2bez::TraceMode {
         match m {
             Mode::Default => img2bez::TraceMode::Default,
             Mode::Smooth => img2bez::TraceMode::Smooth,
+            Mode::SmoothG2 => img2bez::TraceMode::SmoothG2,
             Mode::Line => img2bez::TraceMode::LineOnly,
         }
     }
@@ -566,6 +572,7 @@ fn mode_name(m: img2bez::TraceMode) -> &'static str {
     match m {
         img2bez::TraceMode::Default => "default",
         img2bez::TraceMode::Smooth => "smooth",
+        img2bez::TraceMode::SmoothG2 => "smooth-g2",
         img2bez::TraceMode::LineOnly => "line",
         _ => "unknown",
     }
