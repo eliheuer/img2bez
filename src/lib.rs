@@ -76,6 +76,7 @@ pub use ml::judge;
 pub use pipeline::placement;
 pub use pipeline::vectorize::boundary::{
     BoundaryFeature, BoundarySample, fit_smooth_contours,
+    fit_smooth_contours_economical,
 };
 
 // CLI/eval-harness support: public for the binary target, doc-hidden,

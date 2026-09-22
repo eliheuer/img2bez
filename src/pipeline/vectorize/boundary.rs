@@ -79,6 +79,51 @@ pub fn fit_smooth_contours(
     Ok(outline)
 }
 
+/// Fit smooth contours, then remove structurally redundant on-curves.
+///
+/// The initial fit retains every supplied extremum exactly, just like
+/// [`fit_smooth_contours`].
+/// A second whole-contour pass may merge adjacent fitted spans when their
+/// combined deviation is within `economy_tolerance` font units.
+/// This is useful for analytic sources that report real but visually
+/// insignificant extrema very close together.
+///
+/// The result does not promise to retain every supplied extremum.
+/// `economy_tolerance` is an additional deviation budget and must be finite
+/// and positive.
+///
+/// # Errors
+///
+/// Returns the errors from [`fit_smooth_contours`], or
+/// [`TraceError::InvalidBoundary`] when `economy_tolerance` is invalid.
+pub fn fit_smooth_contours_economical(
+    contours: &[Vec<BoundarySample>],
+    accuracy: f64,
+    economy_tolerance: f64,
+) -> Result<Outline, TraceError> {
+    if !economy_tolerance.is_finite() || economy_tolerance <= 0.0 {
+        return Err(TraceError::InvalidBoundary(
+            "economy tolerance must be finite and positive",
+        ));
+    }
+    let constrained = fit_smooth_contours(contours, accuracy)?;
+    let paths = constrained
+        .to_bezpaths()
+        .into_iter()
+        .map(|path| {
+            kurbo::simplify::simplify_bezpath(
+                path,
+                economy_tolerance,
+                &kurbo::simplify::SimplifyOptions::default()
+                    .opt_level(kurbo::simplify::SimplifyOptLevel::Optimize),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut outline = Outline::from_bezpaths(&paths);
+    outline.normalize_starts(false);
+    Ok(outline)
+}
+
 fn position(sample: BoundarySample) -> Point {
     Point::new(sample.position[0], sample.position[1])
 }
@@ -221,7 +266,7 @@ fn fit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kurbo::{ParamCurve, Shape};
+    use kurbo::{ParamCurve, ParamCurveNearest, Shape};
 
     fn circle(radius: f64) -> Vec<BoundarySample> {
         (0..256)
@@ -263,6 +308,37 @@ mod tests {
                         < 0.03
                 );
             }
+        }
+    }
+
+    #[test]
+    fn economical_fit_merges_nearby_redundant_extrema() {
+        let mut samples = circle(100.0);
+        for index in [63, 65] {
+            samples[index].feature = Some(BoundaryFeature::ExtremumY);
+        }
+        let constrained = fit_smooth_contours(&[samples.clone()], 0.25)
+            .unwrap()
+            .to_bezpaths();
+        let economical = fit_smooth_contours_economical(&[samples], 0.25, 0.5)
+            .unwrap()
+            .to_bezpaths();
+        assert_eq!(constrained[0].segments().count(), 6);
+        assert!(
+            economical[0].segments().count()
+                < constrained[0].segments().count()
+        );
+        let economical_segments: Vec<_> = economical[0]
+            .segments()
+            .map(|segment| segment.to_cubic())
+            .collect();
+        for sample in circle(100.0) {
+            let point = position(sample);
+            let deviation = economical_segments
+                .iter()
+                .map(|segment| segment.nearest(point, 1e-6).distance_sq.sqrt())
+                .fold(f64::INFINITY, f64::min);
+            assert!(deviation <= 0.75, "economical deviation {deviation}");
         }
     }
 
